@@ -65,7 +65,7 @@ def _():
 
     print("=== Days of Therapy (DOT) Analysis ===")
     print("Setting up environment...")
-    return MedicationAdminIntermittent, Path, pd
+    return MedicationAdminIntermittent, Path, np, pd
 
 
 @app.cell
@@ -250,9 +250,12 @@ def _():
     import polars as pl
     from tqdm import tqdm
     from datetime import timedelta
+    import matplotlib.pyplot as plt
+    import scipy.interpolate
 
     print("Converting to Polars for optimized processing...")
-    return pl, timedelta, tqdm
+    print("Loading visualization libraries...")
+    return pl, plt, scipy, timedelta, tqdm
 
 
 @app.cell
@@ -421,14 +424,27 @@ def _(mo):
 
 @app.cell
 def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
-    # Calculate DOT for each antibiotic per hospitalization
-    print("Calculating DOT for each antibiotic...")
+    # ============================================================
+    # INITIALIZE DATA STRUCTURES AND LOOKUP TABLES
+    # ============================================================
+
+    print("Calculating DOT and Daily ASC for each antibiotic...")
 
     # Get unique antibiotics from the spectrum scoring
     all_antibiotics = abx_spectrum['med_category'].str.strip().tolist()
 
-    # Initialize DOT results
+    # Create spectrum score lookup dictionary for ASC calculation
+    spectrum_lookup = dict(zip(
+        abx_spectrum['med_category'].str.strip(),
+        abx_spectrum['spectrum_score']
+    ))
+
+    print(f"  Antibiotics to track: {len(all_antibiotics)}")
+    print(f"  Spectrum scores loaded: {len(spectrum_lookup)}")
+
+    # Initialize result lists
     dot_results = []
+    daily_asc_results = []
 
     # Group windows by hospitalization for faster processing
     hosp_windows = windows_pl.group_by('hospitalization_id').agg([
@@ -437,9 +453,13 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
         pl.col('window_end')
     ])
 
-    print(f"Processing {len(hosp_windows):,} hospitalizations...")
+    print(f"\nProcessing {len(hosp_windows):,} hospitalizations...")
 
-    for hosp_row in tqdm(hosp_windows.iter_rows(named=True), total=len(hosp_windows), desc="Calculating DOT"):
+    # ============================================================
+    # MAIN LOOP: PROCESS EACH HOSPITALIZATION
+    # ============================================================
+
+    for hosp_row in tqdm(hosp_windows.iter_rows(named=True), total=len(hosp_windows), desc="Calculating DOT & ASC"):
         h_id = hosp_row['hospitalization_id']
 
         # Get all medications for this hospitalization
@@ -457,7 +477,10 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
         h_antibiotic_dot = {abx: 0 for abx in all_antibiotics}
         h_antibiotic_free_days = 0
 
-        # Process each window
+        # --------------------------------------------------------
+        # INNER LOOP: PROCESS EACH 24-HOUR WINDOW
+        # --------------------------------------------------------
+
         for w_idx in range(len(h_window_nums)):
             w_num = h_window_nums[w_idx]
             w_start = h_window_starts[w_idx]
@@ -472,7 +495,11 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
             # Track if any antibiotic was given in this window
             w_has_antibiotic = False
 
-            # Check each antibiotic
+            # --------------------------------------------------------
+            # CALCULATE DOT (Days of Therapy)
+            # --------------------------------------------------------
+
+            # Check each antibiotic for DOT counting
             for abx_cat in all_antibiotics:
                 abx_in_win = w_meds.filter(
                     pl.col('med_category') == abx_cat
@@ -492,7 +519,32 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
             if not w_has_antibiotic:
                 h_antibiotic_free_days += 1
 
-        # Store results for this hospitalization
+            # --------------------------------------------------------
+            # CALCULATE DAILY ASC (Antibiotic Spectrum Coverage)
+            # --------------------------------------------------------
+
+            # Get unique antibiotics used in this window (with non-null doses)
+            w_meds_with_dose = w_meds.filter(pl.col('med_dose').is_not_null())
+            antibiotics_in_window = w_meds_with_dose['med_category'].unique().to_list()
+
+            # Sum spectrum scores for all antibiotics used in this window
+            daily_asc = sum(
+                spectrum_lookup.get(abx.strip(), 0)
+                for abx in antibiotics_in_window
+            )
+
+            # Store daily ASC result
+            daily_asc_results.append({
+                'hospitalization_id': h_id,
+                'window_num': w_num,
+                'daily_asc': daily_asc
+            })
+
+        # --------------------------------------------------------
+        # STORE RESULTS FOR THIS HOSPITALIZATION
+        # --------------------------------------------------------
+
+        # Store DOT results for this hospitalization
         for abx_cat, dot_count in h_antibiotic_dot.items():
             if dot_count > 0:  # Only store if DOT > 0 to save space
                 dot_results.append({
@@ -508,10 +560,14 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
             'dot': h_antibiotic_free_days
         })
 
+    # ============================================================
+    # CREATE DOT DATAFRAMES
+    # ============================================================
+
     # Create DOT DataFrame (long format)
     dot_long_pl = pl.DataFrame(dot_results)
 
-    print(f"✓ DOT calculation complete")
+    print(f"\n✓ DOT calculation complete")
     print(f"  Total DOT records: {len(dot_long_pl):,}")
     print(f"  Unique hospitalizations with antibiotics: {dot_long_pl.filter(pl.col('antibiotic') != 'ANTIBIOTIC_FREE')['hospitalization_id'].n_unique():,}")
 
@@ -552,7 +608,18 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
     print(f"✓ Hospital-level table created")
     print(f"  Shape: {dot_hospital_level.shape}")
     print(f"  Columns: {len(dot_hospital_level.columns)} (hospitalization_id, PD, + {len(dot_hospital_level.columns)-2} antibiotics)")
-    return (dot_hospital_level,)
+
+    # ============================================================
+    # CREATE DAILY ASC DATAFRAMES
+    # ============================================================
+
+    # Create Polars DataFrame for daily ASC
+    daily_asc_patient_level = pl.DataFrame(daily_asc_results)
+
+    print(f"\n✓ Daily ASC calculated")
+    print(f"  Total records: {len(daily_asc_patient_level):,}")
+    print(f"  Unique hospitalizations: {daily_asc_patient_level['hospitalization_id'].n_unique():,}")
+    return daily_asc_patient_level, dot_hospital_level
 
 
 @app.cell
@@ -824,82 +891,10 @@ def _(mo):
 
 
 @app.cell
-def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
-    # Calculate daily ASC per window (0-10) for each hospitalization
-    print("Calculating Daily Antibiotic Spectrum Coverage (ASC) per window...")
-
-    # Create spectrum score lookup dictionary
-    spectrum_lookup = dict(zip(
-        abx_spectrum['med_category'].str.strip(),
-        abx_spectrum['spectrum_score']
-    ))
-
-    print(f"  Spectrum scores loaded for {len(spectrum_lookup)} antibiotics")
-
-    # Initialize results list
-    daily_asc_results = []
-
-    # Group windows by hospitalization (ALL windows - needed for DASC calculation)
-    print("\nProcessing ALL windows for ASC calculation...")
-    hosp_windows_asc = windows_pl.group_by('hospitalization_id').agg([
-        pl.col('window_num'),
-        pl.col('window_start'),
-        pl.col('window_end')
-    ])
-
-    print(f"Processing {len(hosp_windows_asc):,} hospitalizations for ASC calculation...")
-
-    # Loop through each hospitalization
-    for hosp_row in tqdm(hosp_windows_asc.iter_rows(named=True), total=len(hosp_windows_asc), desc="Calculating Daily ASC"):
-        h_id = hosp_row['hospitalization_id']
-
-        # Get all medications for this hospitalization
-        h_meds = meds_pl.filter(pl.col('hospitalization_id') == h_id)
-
-        # Get windows for this hospitalization
-        h_window_nums = hosp_row['window_num']
-        h_window_starts = hosp_row['window_start']
-        h_window_ends = hosp_row['window_end']
-
-        # Process each window (0-10)
-        for w_idx in range(len(h_window_nums)):
-            w_num = h_window_nums[w_idx]
-            w_start = h_window_starts[w_idx]
-            w_end = h_window_ends[w_idx]
-
-            # Filter medications in this window
-            w_meds = h_meds.filter(
-                (pl.col('admin_dttm') >= w_start) &
-                (pl.col('admin_dttm') <= w_end) &
-                (pl.col('med_dose').is_not_null())  # Only count non-null doses
-            )
-
-            # Get unique antibiotics used in this window
-            antibiotics_in_window = w_meds['med_category'].unique().to_list()
-
-            # Sum spectrum scores for all antibiotics used in this window
-            daily_asc = sum(
-                spectrum_lookup.get(abx.strip(), 0)
-                for abx in antibiotics_in_window
-            )
-
-            # Store result
-            daily_asc_results.append({
-                'hospitalization_id': h_id,
-                'window_num': w_num,
-                'daily_asc': daily_asc
-            })
-
-    # Create Polars DataFrame
-    daily_asc_patient_level = pl.DataFrame(daily_asc_results)
-
-    print(f"\n✓ Daily ASC calculated")
-    print(f"  Total records: {len(daily_asc_patient_level):,}")
-    print(f"  Unique hospitalizations: {daily_asc_patient_level['hospitalization_id'].n_unique():,}")
-
+def _(daily_asc_patient_level, pl):
     # Calculate summary statistics per window (for sharing across sites)
     # Filter to windows 0-10 for summary/plotting
-    print("\nCalculating summary statistics per window (Days 0-10 for plotting)...")
+    print("Calculating summary statistics per window (Days 0-10 for plotting)...")
     daily_asc_summary = (
         daily_asc_patient_level
         .filter(pl.col('window_num') <= 10)  # Only windows 0-10 for summary
@@ -919,7 +914,7 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
     print(daily_asc_summary.to_pandas().to_string(index=False))
 
     print(f"\n✓ Daily ASC summary calculated")
-    return daily_asc_patient_level, daily_asc_summary
+    return (daily_asc_summary,)
 
 
 @app.cell
@@ -1011,7 +1006,7 @@ def _(cohort_df, daily_asc_patient_level, dot_hospital_level, pl):
     # Create overall metrics DataFrame
     dasc_overall = pl.DataFrame({
         'metric': ['Total DASC', 'Total PD', 'DASC per 1000 PD'],
-        'value': [total_dasc_overall, float(total_pd_overall), dasc_per_1000_pd_overall]
+        'value': [float(total_dasc_overall), float(total_pd_overall), float(dasc_per_1000_pd_overall)]
     })
 
     # === DASC METRICS BY YEAR ===
@@ -1052,6 +1047,221 @@ def _(cohort_df, daily_asc_patient_level, dot_hospital_level, pl):
 
 @app.cell
 def _(mo):
+    mo.md(
+        r"""
+    ## Calculate Antibiotic-Free Days (AFD)
+
+    ### Overview (Step 7 from README)
+    This section calculates **Antibiotic-Free Days (AFD)**, which is the ratio of days without any antibiotic administration to total ICU days for each hospitalization.
+
+    ### Key Concept
+    **Antibiotic-Free Days** were already counted during the DOT calculation loop (lines 516-517) and stored in the `ANTIBIOTIC_FREE` column of `dot_hospital_level`.
+
+    ### Formula
+    ```
+    AFD Rate = (Days without antibiotics / Days in ICU) per hospitalization
+    ```
+
+    Where:
+    - **Days without antibiotics**: Number of 24-hour windows with zero antibiotic administrations (ANTIBIOTIC_FREE column)
+    - **Days in ICU**: Total Patient-Days (PD column = number of 24-hour windows)
+    - **AFD Rate**: Proportion of ICU stay without antibiotics (0.0 to 1.0)
+
+    ### Example
+    **Hospitalization with 5 ICU days:**
+    - Day 0: Vancomycin + Piperacillin-Tazobactam (antibiotics given)
+    - Day 1: Vancomycin (antibiotics given)
+    - Day 2: No antibiotics (antibiotic-free)
+    - Day 3: No antibiotics (antibiotic-free)
+    - Day 4: Vancomycin (antibiotics given)
+
+    **Antibiotic-Free Days** = 2 (Days 2, 3)
+
+    **Days in ICU** = 5
+
+    **AFD Rate** = 2 / 5 = 0.40 (40%)
+
+    ### Purpose
+    - Quantifies antibiotic stewardship effectiveness
+    - Identifies opportunities for antibiotic de-escalation
+    - Enables benchmarking across sites
+    - Higher AFD rate may indicate better antibiotic stewardship
+
+    ### Outputs
+    - **Patient-level**: AFD rate for each hospitalization
+    - **Summary**: Mean, SD, median, min, max of AFD rates (for sharing)
+    """
+    )
+    return
+
+
+@app.cell
+def _(dot_hospital_level, pl):
+    # Calculate Antibiotic-Free Days (AFD) Rate
+    print("Calculating Antibiotic-Free Days (AFD) Rate...")
+
+    # Extract relevant columns from dot_hospital_level
+    # ANTIBIOTIC_FREE column was created during DOT calculation (lines 554-558)
+    afd_patient_level = (
+        dot_hospital_level
+        .select([
+            'hospitalization_id',
+            pl.col('ANTIBIOTIC_FREE').alias('antibiotic_free_days'),
+            pl.col('PD').alias('days_in_icu')
+        ])
+        .with_columns(
+            (pl.col('antibiotic_free_days') / pl.col('days_in_icu')).alias('afd_rate')
+        )
+    )
+
+    print(f"✓ AFD calculated for {len(afd_patient_level):,} hospitalizations")
+
+    # Calculate summary statistics
+    mean_afd_rate = afd_patient_level['afd_rate'].mean()
+    std_afd_rate = afd_patient_level['afd_rate'].std()
+    median_afd_rate = afd_patient_level['afd_rate'].median()
+    min_afd_rate = afd_patient_level['afd_rate'].min()
+    max_afd_rate = afd_patient_level['afd_rate'].max()
+    total_hospitalizations_afd = len(afd_patient_level)
+
+    print(f"\n=== Antibiotic-Free Days (AFD) Summary ===")
+    print(f"  Mean AFD Rate: {mean_afd_rate:.4f} ({mean_afd_rate*100:.2f}%)")
+    print(f"  SD AFD Rate: {std_afd_rate:.4f}")
+    print(f"  Median AFD Rate: {median_afd_rate:.4f} ({median_afd_rate*100:.2f}%)")
+    print(f"  Min AFD Rate: {min_afd_rate:.4f} ({min_afd_rate*100:.2f}%)")
+    print(f"  Max AFD Rate: {max_afd_rate:.4f} ({max_afd_rate*100:.2f}%)")
+    print(f"  Total Hospitalizations: {total_hospitalizations_afd:,}")
+
+    # Create summary DataFrame
+    afd_summary = pl.DataFrame({
+        'metric': [
+            'mean_afd_rate',
+            'std_afd_rate',
+            'median_afd_rate',
+            'min_afd_rate',
+            'max_afd_rate',
+            'total_hospitalizations'
+        ],
+        'value': [
+            float(mean_afd_rate),
+            float(std_afd_rate),
+            float(median_afd_rate),
+            float(min_afd_rate),
+            float(max_afd_rate),
+            float(total_hospitalizations_afd)
+        ]
+    })
+
+    print(f"\n✓ AFD summary calculated")
+    return afd_patient_level, afd_summary
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## Calculate Year-Based ASC Time Series Summary
+
+    ### Overview
+    This section calculates **year-based summary statistics for Antibiotic Spectrum Coverage (ASC)** to enable time series plotting and trend analysis across years 2018-2024.
+
+    ### Purpose
+    - Track ASC trends over time to identify changes in antibiotic prescribing patterns
+    - Enable cross-site comparison of ASC evolution across healthcare centers
+    - Support generation of time series plots showing ASC trajectories by year
+    - Provide data for the plot shown in research image: "Antibiotic Spectrum Score by Healthcare Center Over Time"
+
+    ### Method
+    1. Join `daily_asc_patient_level` (window-level ASC data) with `windows_pl` (window timestamps)
+    2. Extract year from `window_start` datetime
+    3. Group by year and calculate summary statistics:
+       - Mean ASC per year (average across all windows in that year)
+       - Standard deviation of ASC
+       - Median, min, max ASC
+       - Number of window observations
+       - Number of unique hospitalizations
+
+    ### Formula
+    ```
+    For each year (2018-2024):
+        Year-based Mean ASC = Mean(daily_asc) across all windows in that year
+    ```
+
+    ### Example Output
+    ```
+    year | mean_asc | sd_asc | n_windows | n_hospitalizations
+    -----|----------|--------|-----------|-------------------
+    2018 |   4.52   |  3.21  |   15,234  |       1,245
+    2019 |   4.68   |  3.34  |   18,567  |       1,512
+    2020 |   5.12   |  3.58  |   20,123  |       1,678
+    ```
+
+    ### Context: Single-Site Analysis
+    - This analysis produces ONE site's ASC trend data
+    - Sites share their `asc_by_year_summary.parquet` files for comparison
+    - When combined, creates multi-site time series comparison plots
+    - Each site appears as one line/trend in the final visualization
+    """
+    )
+    return
+
+
+@app.cell
+def _(daily_asc_patient_level, pl, windows_pl):
+    # Calculate year-based ASC summary for time series plotting
+    print("Calculating year-based ASC summary for time series analysis...")
+
+    # Join daily_asc_patient_level with windows_pl to get window timestamps
+    print("\nJoining daily ASC data with window timestamps...")
+    asc_with_timestamps = (
+        daily_asc_patient_level
+        .join(
+            windows_pl.select(['hospitalization_id', 'window_num', 'window_start']),
+            on=['hospitalization_id', 'window_num'],
+            how='left'
+        )
+    )
+
+    print(f"✓ Joined {len(asc_with_timestamps):,} records")
+
+    # Extract year from window_start
+    print("\nExtracting year from window_start timestamps...")
+    asc_with_year = asc_with_timestamps.with_columns(
+        pl.col('window_start').dt.year().alias('year')
+    )
+
+    print(f"✓ Year extracted")
+    print(f"  Year range: {asc_with_year['year'].min()} - {asc_with_year['year'].max()}")
+
+    # Group by year and calculate summary statistics
+    print("\nCalculating summary statistics by year...")
+    asc_by_year_summary = (
+        asc_with_year
+        .group_by('year')
+        .agg([
+            pl.col('daily_asc').mean().alias('mean_asc'),
+            pl.col('daily_asc').std().alias('sd_asc'),
+            pl.col('daily_asc').median().alias('median_asc'),
+            pl.col('daily_asc').min().alias('min_asc'),
+            pl.col('daily_asc').max().alias('max_asc'),
+            pl.col('window_num').count().alias('n_windows'),
+            pl.col('hospitalization_id').n_unique().alias('n_hospitalizations')
+        ])
+        .sort('year')
+    )
+
+    print(f"\n=== Year-Based ASC Summary ===")
+    print(asc_by_year_summary.to_pandas().to_string(index=False))
+
+    print(f"\n✓ Year-based ASC summary calculated")
+    print(f"  Years analyzed: {len(asc_by_year_summary)}")
+    print(f"  Total windows: {asc_by_year_summary['n_windows'].sum():,}")
+    print(f"\n📊 This data enables time series plotting of ASC trends over years 2018-2024")
+    return (asc_by_year_summary,)
+
+
+@app.cell
+def _(mo):
     mo.md(r"""## Save Results""")
     return
 
@@ -1059,6 +1269,9 @@ def _(mo):
 @app.cell
 def _(
     Path,
+    afd_patient_level,
+    afd_summary,
+    asc_by_year_summary,
     daily_asc_patient_level,
     daily_asc_summary,
     dasc_by_year,
@@ -1071,77 +1284,310 @@ def _(
     # Save results
     print("Saving results...")
 
-    # Ensure output directory exists
+    # Ensure output directories exist
     Path('PHI_DATA').mkdir(exist_ok=True)
+    Path('RESULTS_UPLOAD_ME').mkdir(exist_ok=True)
+
+    print("\n=== PHI DATA (Patient-Level - Do Not Share) ===")
 
     # Save hospital-level DOT table (wide format with PD column)
     print("\n1. Hospital-level DOT table (wide format):")
-    hosp_output_path = Path('PHI_DATA') / 'dot_hospital_level.parquet'
-    dot_hospital_level.write_parquet(hosp_output_path)
-    print(f"   ✓ Saved: {hosp_output_path}")
+    dot_hospital_level.write_parquet(Path('PHI_DATA') / 'dot_hospital_level.parquet')
+    print(f"   ✓ Saved: PHI_DATA/dot_hospital_level.parquet")
     print(f"   Shape: {dot_hospital_level.shape}")
 
+    # Save daily ASC patient-level data
+    print("\n2. Daily ASC patient-level (all windows):")
+    daily_asc_patient_level.write_parquet(Path('PHI_DATA') / 'daily_asc_patient_level.parquet')
+    print(f"   ✓ Saved: PHI_DATA/daily_asc_patient_level.parquet")
+    print(f"   Shape: {daily_asc_patient_level.shape}")
+
+    # Save AFD patient-level data
+    print("\n3. AFD patient-level (all hospitalizations):")
+    afd_patient_level.write_parquet(Path('PHI_DATA') / 'afd_patient_level.parquet')
+    print(f"   ✓ Saved: PHI_DATA/afd_patient_level.parquet")
+    print(f"   Shape: {afd_patient_level.shape}")
+
+    print("\n=== SUMMARY DATA (Safe to Share - Upload These Files) ===")
+
     # Save antibiotic-level metrics
-    print("\n2. Antibiotic-level metrics:")
-    abx_output_path = Path('PHI_DATA') / 'dot_antibiotic_level.parquet'
-    dot_antibiotic_level.write_parquet(abx_output_path)
-    print(f"   ✓ Saved: {abx_output_path}")
+    print("\n4. Antibiotic-level metrics:")
+    dot_antibiotic_level.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_antibiotic_level.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_antibiotic_level.csv")
     print(f"   Shape: {dot_antibiotic_level.shape}")
 
     # Save cohort-level overall metrics
-    print("\n3. Cohort-level overall metrics:")
-    cohort_output_path = Path('PHI_DATA') / 'dot_cohort_level.parquet'
-    dot_cohort_level.write_parquet(cohort_output_path)
-    print(f"   ✓ Saved: {cohort_output_path}")
+    print("\n5. Cohort-level overall metrics:")
+    dot_cohort_level.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_cohort_level.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_cohort_level.csv")
     print(f"   Shape: {dot_cohort_level.shape}")
 
     # Save location-type-level metrics
-    print("\n4. Location-type-level metrics:")
-    location_output_path = Path('PHI_DATA') / 'dot_location_type_level.parquet'
-    dot_location_type_level.write_parquet(location_output_path)
-    print(f"   ✓ Saved: {location_output_path}")
+    print("\n6. Location-type-level metrics:")
+    dot_location_type_level.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_location_type_level.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_location_type_level.csv")
     print(f"   Shape: {dot_location_type_level.shape}")
 
-    # Save daily ASC patient-level data
-    print("\n5. Daily ASC patient-level (all windows):")
-    daily_asc_patient_path = Path('PHI_DATA') / 'daily_asc_patient_level.parquet'
-    daily_asc_patient_level.write_parquet(daily_asc_patient_path)
-    print(f"   ✓ Saved: {daily_asc_patient_path}")
-    print(f"   Shape: {daily_asc_patient_level.shape}")
-
     # Save daily ASC summary (for sharing)
-    print("\n6. Daily ASC summary (windows 0-10, for sharing):")
-    daily_asc_summary_path = Path('PHI_DATA') / 'daily_asc_summary.parquet'
-    daily_asc_summary.write_parquet(daily_asc_summary_path)
-    print(f"   ✓ Saved: {daily_asc_summary_path}")
+    print("\n7. Daily ASC summary (windows 0-10, for sharing):")
+    daily_asc_summary.write_csv(Path('RESULTS_UPLOAD_ME') / 'daily_asc_summary.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/daily_asc_summary.csv")
     print(f"   Shape: {daily_asc_summary.shape}")
 
     # Save DASC overall metrics
-    print("\n7. DASC overall metrics:")
-    dasc_overall_path = Path('PHI_DATA') / 'dasc_overall.parquet'
-    dasc_overall.write_parquet(dasc_overall_path)
-    print(f"   ✓ Saved: {dasc_overall_path}")
+    print("\n8. DASC overall metrics:")
+    dasc_overall.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_overall.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dasc_overall.csv")
     print(f"   Shape: {dasc_overall.shape}")
 
     # Save DASC by year metrics
-    print("\n8. DASC by year metrics:")
-    dasc_by_year_path = Path('PHI_DATA') / 'dasc_by_year.parquet'
-    dasc_by_year.write_parquet(dasc_by_year_path)
-    print(f"   ✓ Saved: {dasc_by_year_path}")
+    print("\n9. DASC by year metrics:")
+    dasc_by_year.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_by_year.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dasc_by_year.csv")
     print(f"   Shape: {dasc_by_year.shape}")
 
+    # Save AFD summary (for sharing)
+    print("\n10. AFD summary (for sharing):")
+    afd_summary.write_csv(Path('RESULTS_UPLOAD_ME') / 'afd_summary.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/afd_summary.csv")
+    print(f"   Shape: {afd_summary.shape}")
+
+    # Save year-based ASC summary (for time series plotting)
+    print("\n11. Year-based ASC summary (for time series plotting):")
+    asc_by_year_summary.write_csv(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_summary.csv')
+    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_summary.csv")
+    print(f"   Shape: {asc_by_year_summary.shape}")
+
     print(f"\n✓ All results saved successfully!")
-    print(f"\n=== Summary of Output Files ===")
-    print(f"DOT Metrics:")
-    print(f"  - dot_hospital_level.parquet (hospitalization-level, wide format)")
-    print(f"  - dot_antibiotic_level.parquet (antibiotic-level summary)")
-    print(f"  - dot_cohort_level.parquet (overall cohort metrics)")
-    print(f"  - dot_location_type_level.parquet (by ICU location type)")
-    print(f"\nASC/DASC Metrics:")
-    print(f"  - daily_asc_patient_level.parquet (daily ASC per hospitalization per window)")
-    print(f"  - daily_asc_summary.parquet (mean/SD per window 0-10, for sharing)")
-    print(f"  - dasc_overall.parquet (overall DASC metrics)")
-    print(f"  - dasc_by_year.parquet (DASC metrics by year)")
+    print(f"\n{'='*80}")
+    print(f"=== SUMMARY OF OUTPUT FILES ===")
+    print(f"{'='*80}")
+
+    print(f"\n📁 PHI_DATA/ (3 files - PATIENT-LEVEL DATA - DO NOT SHARE)")
+    print(f"   Contains hospitalization_id - keep confidential")
+    print(f"   ----------------------------------------")
+    print(f"   1. dot_hospital_level.parquet")
+    print(f"      → DOT per antibiotic per hospitalization (wide format)")
+    print(f"   2. daily_asc_patient_level.parquet")
+    print(f"      → Daily ASC per hospitalization per window")
+    print(f"   3. afd_patient_level.parquet")
+    print(f"      → AFD rate per hospitalization")
+
+    print(f"\n📤 RESULTS_UPLOAD_ME/ (8 files - SUMMARY DATA - SAFE TO SHARE)")
+    print(f"   No patient identifiers - aggregate metrics only - CSV format")
+    print(f"   ----------------------------------------")
+    print(f"\n   DOT Metrics:")
+    print(f"   4. dot_antibiotic_level.csv")
+    print(f"      → DOT per 1000 PD by antibiotic")
+    print(f"   5. dot_cohort_level.csv")
+    print(f"      → Overall cohort DOT metrics")
+    print(f"   6. dot_location_type_level.csv")
+    print(f"      → DOT metrics by ICU location type")
+    print(f"\n   ASC/DASC Metrics:")
+    print(f"   7. daily_asc_summary.csv")
+    print(f"      → Mean/SD ASC per window (days 0-10)")
+    print(f"   8. dasc_overall.csv")
+    print(f"      → Overall DASC metrics")
+    print(f"   9. dasc_by_year.csv")
+    print(f"      → DASC metrics by year (2018-2024)")
+    print(f"   11. asc_by_year_summary.csv")
+    print(f"      → ASC summary by year for time series plotting")
+    print(f"\n   AFD Metrics:")
+    print(f"   10. afd_summary.csv")
+    print(f"      → Mean/SD of AFD rates")
+
+    print(f"\n{'='*80}")
+    print(f"✅ UPLOAD ONLY THE RESULTS_UPLOAD_ME/ FOLDER FOR CROSS-SITE COMPARISON")
+    print(f"{'='*80}")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## Visualizations: ASC Time Series Plots
+
+    ### Overview
+    This section creates publication-quality visualizations of Antibiotic Spectrum Coverage (ASC) trends using **spline interpolation** for smooth curves.
+
+    ### Plots Generated
+
+    **1. ASC Trend by Year (2018-2024)**
+    - Shows how ASC evolves across years
+    - Identifies temporal trends in antibiotic prescribing patterns
+    - Useful for comparing with other healthcare centers
+
+    **2. ASC Trend by ICU Day (Days 0-10)**
+    - Shows ASC trajectory during early ICU stay
+    - Identifies escalation/de-escalation patterns
+    - Captures initial empiric therapy vs. subsequent adjustments
+
+    ### Technical Details
+    - **Interpolation**: Cubic B-spline (scipy.interpolate.make_interp_spline)
+    - **Error bands**: Mean ± Standard Deviation (shaded regions)
+    - **Resolution**: 500 interpolated points for smooth curves
+    - **Output format**: PNG (300 DPI for publication quality)
+    - **Location**: RESULTS_UPLOAD_ME/ folder (safe to share)
+
+    ### Interpretation
+    - **Line**: Mean ASC across all patients
+    - **Shaded band**: Variability (±1 SD)
+    - **Wider bands**: Higher inter-patient variability
+    - **Upward slope**: Increasing spectrum coverage (escalation)
+    - **Downward slope**: Decreasing spectrum coverage (de-escalation)
+    """
+    )
+    return
+
+
+@app.cell
+def _(Path, asc_by_year_summary, np, plt, scipy):
+    # Plot 1: ASC Trend by Year
+    print("Creating ASC by Year plot...")
+
+    # Convert to pandas for easier plotting
+    df_year = asc_by_year_summary.to_pandas().sort_values('year')
+
+    # Extract data
+    years = df_year['year'].values
+    mean_asc_year = df_year['mean_asc'].values
+    sd_asc_year = df_year['sd_asc'].values
+
+    # Create spline interpolation (if enough points)
+    if len(years) >= 4:
+        # Cubic spline requires at least 4 points
+        years_smooth = np.linspace(years.min(), years.max(), 500)
+        spline = scipy.interpolate.make_interp_spline(years, mean_asc_year, k=3)
+        mean_smooth = spline(years_smooth)
+
+        # Interpolate SD as well for smooth error bands
+        spline_sd = scipy.interpolate.make_interp_spline(years, sd_asc_year, k=3)
+        sd_smooth = spline_sd(years_smooth)
+    else:
+        # Fall back to original data if insufficient points
+        years_smooth = years
+        mean_smooth = mean_asc_year
+        sd_smooth = sd_asc_year
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot mean line
+    ax.plot(years_smooth, mean_smooth, color='#2E86AB', linewidth=2.5, label='Mean ASC')
+
+    # Plot error band (mean ± SD)
+    ax.fill_between(
+        years_smooth,
+        mean_smooth - sd_smooth,
+        mean_smooth + sd_smooth,
+        alpha=0.3,
+        color='#2E86AB',
+        label='±1 SD'
+    )
+
+    # Plot original data points
+    ax.scatter(years, mean_asc_year, color='#A23B72', s=80, zorder=5, label='Observed Mean')
+
+    # Styling
+    ax.set_xlabel('Year', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Mean Antibiotic Spectrum Coverage (ASC)', fontsize=12, fontweight='bold')
+    ax.set_title('Antibiotic Spectrum Coverage Trend Over Time\n(Single-Site Analysis)',
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    ax.legend(loc='best', frameon=True, shadow=True, fontsize=10)
+
+    # Format x-axis to show integer years
+    ax.set_xticks(years)
+    ax.set_xticklabels([int(y) for y in years])
+
+    # Add sample size annotation
+    total_windows = df_year['n_windows'].sum()
+    total_patients = df_year['n_hospitalizations'].sum()
+    ax.text(0.02, 0.98, f'Total: {total_patients:,} hospitalizations, {total_windows:,} patient-days',
+            transform=ax.transAxes, fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+
+    # Save
+    plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_plot.png', dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_plot.png")
+
+    plt.close()
+    return
+
+
+@app.cell
+def _(Path, daily_asc_summary, np, plt, scipy):
+    # Plot 2: ASC Trend by ICU Day (Window)
+    print("Creating ASC by ICU Day plot...")
+
+    # Convert to pandas for easier plotting
+    df_window = daily_asc_summary.to_pandas().sort_values('window_num')
+
+    # Extract data
+    windows = df_window['window_num'].values
+    mean_asc_window = df_window['mean_asc'].values
+    sd_asc_window = df_window['sd_asc'].values
+
+    # Create spline interpolation
+    if len(windows) >= 4:
+        win_windows_smooth = np.linspace(windows.min(), windows.max(), 500)
+        win_spline = scipy.interpolate.make_interp_spline(windows, mean_asc_window, k=3)
+        win_mean_smooth = win_spline(win_windows_smooth)
+
+        win_spline_sd = scipy.interpolate.make_interp_spline(windows, sd_asc_window, k=3)
+        win_sd_smooth = win_spline_sd(win_windows_smooth)
+    else:
+        win_windows_smooth = windows
+        win_mean_smooth = mean_asc_window
+        win_sd_smooth = sd_asc_window
+
+    # Create figure
+    win_fig, win_ax = plt.subplots(figsize=(10, 6))
+
+    # Plot mean line
+    win_ax.plot(win_windows_smooth, win_mean_smooth, color='#06A77D', linewidth=2.5, label='Mean ASC')
+
+    # Plot error band (mean ± SD)
+    win_ax.fill_between(
+        win_windows_smooth,
+        win_mean_smooth - win_sd_smooth,
+        win_mean_smooth + win_sd_smooth,
+        alpha=0.3,
+        color='#06A77D',
+        label='±1 SD'
+    )
+
+    # Plot original data points
+    win_ax.scatter(windows, mean_asc_window, color='#D62828', s=80, zorder=5, label='Observed Mean')
+
+    # Styling
+    win_ax.set_xlabel('ICU Day (Window Number)', fontsize=12, fontweight='bold')
+    win_ax.set_ylabel('Mean Antibiotic Spectrum Coverage (ASC)', fontsize=12, fontweight='bold')
+    win_ax.set_title('Antibiotic Spectrum Coverage by ICU Day\n(Days 0-10 Post-Admission)',
+                 fontsize=14, fontweight='bold', pad=20)
+    win_ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    win_ax.legend(loc='best', frameon=True, shadow=True, fontsize=10)
+
+    # Format x-axis
+    win_ax.set_xticks(windows)
+    win_ax.set_xticklabels([f'Day {int(w)}' for w in windows])
+
+    # Add sample size annotation
+    win_total_windows = df_window['n_hospitalizations'].sum()
+    win_ax.text(0.02, 0.98, f'Sample: {win_total_windows:,} patient-window observations',
+            transform=win_ax.transAxes, fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+
+    # Save
+    plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_window_plot.png', dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_window_plot.png")
+
+    plt.close()
     return
 
 

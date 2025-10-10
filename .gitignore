@@ -5,3 +5,4 @@ output/
 *.parquet
 *.csv
 PHI_DATA/
+*.png
