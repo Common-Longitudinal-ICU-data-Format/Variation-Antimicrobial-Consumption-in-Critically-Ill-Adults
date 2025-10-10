@@ -35,7 +35,7 @@ def _(mo):
     - First ICU admission (`location_category == 'icu'`)
     - Years: 2018-2024
     - First ICU stay only
-    - ICU LOS > 0 days
+    - ICU LOS > 6 hours (0.25 days)
 
     ## Clinical Features Processing
     All features are filtered to ICU stay window (start_dttm to end_dttm):
@@ -274,12 +274,12 @@ def _(first_icu, patient_df, pd):
     print(f"Deaths during ICU stay: {cohort_df['icu_mortality'].sum():,} ({cohort_df['icu_mortality'].mean()*100:.2f}%)")
     print(f"Survived ICU stay: {(cohort_df['icu_mortality'] == 0).sum():,}")
 
-    # Remove encounters with invalid LOS (≤0 days)
+    # Remove encounters with short ICU LOS (≤6 hours / 0.25 days)
     cohort_before_los_filter = len(cohort_df)
-    cohort_df = cohort_df[cohort_df['icu_los_days'] > 0].copy()
-    removed_invalid_los = cohort_before_los_filter - len(cohort_df)
-    if removed_invalid_los > 0:
-        print(f"⚠ Removed {removed_invalid_los:,} encounters with invalid ICU LOS (≤0 days)")
+    cohort_df = cohort_df[cohort_df['icu_los_days'] > 0.25].copy()
+    removed_short_los = cohort_before_los_filter - len(cohort_df)
+    if removed_short_los > 0:
+        print(f"⚠ Removed {removed_short_los:,} encounters with short ICU LOS (≤6 hours / 0.25 days)")
 
     # Reorder columns (vital columns will be added after vitals processing)
     base_columns = [
