@@ -1,2 +1,7 @@
 clif_config.json
 .DS_*
+output/
+*.log
+*.parquet
+*.csv
+PHI_DATA/

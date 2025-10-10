@@ -16,7 +16,7 @@ To evaluate the between-hospital variation in prescription of antibiotics in cri
 
 **CLIF Sites**: No restriction
 
-**Required Tables**: - `adt` - `hospitalization` - `crrt` - `labs` - `medication_admin_intermittent` - `microbiology_culture` - `patient` - `respiratory_support`
+**Required Tables**: - `adt` - `hospitalization` - `crrt` - `labs` - `medication_admin_intermittent` - `patient` - `respiratory_support`
 
 ## Study Population
 
