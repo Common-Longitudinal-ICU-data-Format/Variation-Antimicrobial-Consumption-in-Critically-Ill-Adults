@@ -907,27 +907,58 @@ def _(co_sofa, sofa_cohort_ids):
     print("Loading tables for SOFA computation...")
     print("  Tables: Labs, Vitals, PatientAssessments, MedicationAdminContinuous, RespiratorySupport")
 
-    # Define columns for each table (memory optimization)
-    sofa_columns = {
-        'labs': ['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value', 'lab_value_numeric'],
-        'vitals': ['hospitalization_id', 'recorded_dttm', 'vital_category', 'vital_value'],
-        'patient_assessments': ['hospitalization_id', 'recorded_dttm', 'assessment_category', 'numerical_value'],
-        'medication_admin_continuous': None,  # Load all columns
-        'respiratory_support': None  # Load all columns
+    # Define columns AND category filters for each table (memory optimization)
+    sofa_config = {
+        'labs': {
+            'columns': ['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value', 'lab_value_numeric'],
+            'categories': ['creatinine', 'platelet_count', 'po2_arterial', 'bilirubin_total']
+        },
+        'vitals': {
+            'columns': ['hospitalization_id', 'recorded_dttm', 'vital_category', 'vital_value'],
+            'categories': ['map', 'spo2','weight_kg']
+        },
+        'patient_assessments': {
+            'columns': ['hospitalization_id', 'recorded_dttm', 'assessment_category', 'numerical_value'],
+            'categories': ['gcs_total']
+        },
+        'medication_admin_continuous': {
+            'columns': None,  # Load all columns
+            'categories': ['norepinephrine', 'epinephrine', 'dopamine', 'dobutamine']
+        },
+        'respiratory_support': {
+            'columns': None,  # Load all columns
+            'categories': None  # Load all device categories (need device_category + fio2_set)
+        }
     }
 
-    sofa_tables = ['labs', 'vitals', 'patient_assessments', 'medication_admin_continuous', 'respiratory_support']
+    for table_name, config in sofa_config.items():
+        table_cols = config['columns']
+        table_cats = config['categories']
 
-    for table_name in sofa_tables:
-        table_cols = sofa_columns.get(table_name)
-        print(f"  Loading {table_name}...")
+        # Build filters dictionary
+        filters = {'hospitalization_id': sofa_cohort_ids}
+
+        # Add category filter if specified
+        if table_cats is not None:
+            category_col = {
+                'labs': 'lab_category',
+                'vitals': 'vital_category',
+                'patient_assessments': 'assessment_category',
+                'medication_admin_continuous': 'med_category',
+                'respiratory_support': 'device_category'
+            }[table_name]
+            filters[category_col] = table_cats
+            print(f"  Loading {table_name} ({len(table_cats)} categories)...")
+        else:
+            print(f"  Loading {table_name} (all categories)...")
+
         co_sofa.load_table(
             table_name,
-            filters={'hospitalization_id': sofa_cohort_ids},
+            filters=filters,
             columns=table_cols
         )
 
-    print("✓ All SOFA tables loaded")
+    print("✓ All SOFA tables loaded with category filters")
     return
 
 
@@ -990,10 +1021,9 @@ def _(co_sofa, sofa_cohort_df):
         id_name='hospitalization_id'
     )
 
-    # Show SOFA columns
-    sofa_cols = [col for col in sofa_scores.columns if 'sofa' in col.lower()]
+    # Show SOFA columns (inline to avoid variable conflicts)
     print(f"✓ SOFA scores computed: {sofa_scores.shape}")
-    print(f"  SOFA columns: {sofa_cols}")
+    print(f"  SOFA columns: {[col for col in sofa_scores.columns if 'sofa' in col.lower()]}")
     return (sofa_scores,)
 
 
@@ -1009,17 +1039,10 @@ def _(cohort_final_with_resp, pd, sofa_scores):
         how='left'
     )
 
-    # Get SOFA column names for summary
-    sofa_cols = [col for col in cohort_with_sofa.columns if 'sofa' in col.lower()]
-
+    # Print SOFA merge summary (inline to avoid variable conflicts)
     print(f"✓ SOFA scores merged: {cohort_with_sofa.shape}")
     print(f"  Total columns: {len(cohort_with_sofa.columns)}")
-    print(f"  SOFA columns added: {len(sofa_cols)}")
-    print(f"\n=== SOFA Score Summary ===")
-    if 'sofa_total' in cohort_with_sofa.columns:
-        print(f"Mean SOFA: {cohort_with_sofa['sofa_total'].mean():.2f}")
-        print(f"Median SOFA: {cohort_with_sofa['sofa_total'].median():.2f}")
-        print(f"Missing SOFA: {cohort_with_sofa['sofa_total'].isna().sum():,} ({cohort_with_sofa['sofa_total'].isna().mean()*100:.1f}%)")
+    print(f"  SOFA columns added: {len([col for col in cohort_with_sofa.columns if 'sofa' in col.lower()])}")
     return (cohort_with_sofa,)
 
 
@@ -1119,6 +1142,12 @@ def _(cohort_with_sofa):
 
     print(f"\n=== ICU Location Types ===")
     print(cohort_with_sofa['location_type'].value_counts())
+
+    print(f"\n=== SOFA Score Summary ===")
+    if 'sofa_total' in cohort_with_sofa.columns:
+        print(f"Mean SOFA: {cohort_with_sofa['sofa_total'].mean():.2f}")
+        print(f"Median SOFA: {cohort_with_sofa['sofa_total'].median():.2f}")
+        print(f"Missing SOFA: {cohort_with_sofa['sofa_total'].isna().sum():,} ({cohort_with_sofa['sofa_total'].isna().mean()*100:.1f}%)")
     return
 
 
@@ -1152,12 +1181,6 @@ def _(cohort_with_sofa):
     print(f"Location: {output_path}")
     print(f"Rows: {len(cohort_with_sofa):,}")
     print(f"Columns: {len(cohort_with_sofa.columns)}")
-
-    # Show SOFA columns included
-    sofa_cols = [col for col in cohort_with_sofa.columns if 'sofa' in col.lower()]
-    if sofa_cols:
-        print(f"SOFA columns: {len(sofa_cols)} - {sofa_cols}")
-
     print(f"File size: {output_path.stat().st_size / (1024**2):.2f} MB")
     return
 
