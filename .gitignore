@@ -6,3 +6,4 @@ output/
 *.csv
 PHI_DATA/
 *.png
+*.json

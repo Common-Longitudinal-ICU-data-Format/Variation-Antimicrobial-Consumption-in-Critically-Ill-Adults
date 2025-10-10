@@ -195,7 +195,7 @@ def _(first_icu, patient_df, pd):
     print("Adding patient demographics...")
 
     cohort_df = pd.merge(
-        first_icu[['patient_id', 'hospitalization_id', 'in_dttm', 'out_dttm',     'location_type','admission_dttm', 'discharge_dttm','discharge_category']],
+        first_icu[['patient_id', 'hospitalization_id', 'age_at_admission', 'in_dttm', 'out_dttm',     'location_type','admission_dttm', 'discharge_dttm','discharge_category']],
         patient_df[['patient_id', 'sex_category', 'ethnicity_category', 'race_category', 'language_category', 'death_dttm']],
         on='patient_id',
         how='left'
@@ -285,6 +285,7 @@ def _(first_icu, patient_df, pd):
     base_columns = [
         'patient_id',
         'hospitalization_id',
+        'age_at_admission',
         'admission_dttm', 'discharge_dttm','discharge_category',
         'start_dttm',
         'end_dttm',
@@ -413,6 +414,7 @@ def _(cohort_df, pd, vitals_df):
     final_column_order = [
         'patient_id',
         'hospitalization_id',
+        'age_at_admission',
         'admission_dttm', 'discharge_dttm','discharge_category',
         'start_dttm',
         'end_dttm',
@@ -435,19 +437,7 @@ def _(cohort_df, pd, vitals_df):
     cohort_with_vitals_df = cohort_with_vitals[[col for col in final_column_order if col in cohort_with_vitals.columns]]
 
     # Return final cohort with vitals (renamed to avoid circular dependency)
-    return cohort_with_vitals_df, vitals_pivot
-
-
-@app.cell
-def _(vitals_pivot):
-    vitals_pivot.columns
-    return
-
-
-@app.cell
-def _(cohort_with_vitals_df):
-    cohort_with_vitals_df.columns
-    return
+    return (cohort_with_vitals_df,)
 
 
 @app.cell
@@ -553,6 +543,7 @@ def _(cohort_with_vitals_df, pd, vaso_summary):
     final_column_order_with_meds = [
         'patient_id',
         'hospitalization_id',
+        'age_at_admission',
         'admission_dttm', 'discharge_dttm','discharge_category',
         'start_dttm',
         'end_dttm',
@@ -690,6 +681,7 @@ def _(cohort_final, labs_pivot, pd):
     final_column_order_with_labs = [
         'patient_id',
         'hospitalization_id',
+        'age_at_admission',
         'admission_dttm', 'discharge_dttm','discharge_category',
         'start_dttm',
         'end_dttm',
@@ -828,6 +820,7 @@ def _(cohort_complete, pd, resp_summary):
     final_column_order_with_resp = [
         'patient_id',
         'hospitalization_id',
+        'age_at_admission',
         'admission_dttm', 'discharge_dttm','discharge_category',
         'start_dttm',
         'end_dttm',

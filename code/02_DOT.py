@@ -10,7 +10,7 @@ def _():
     return (mo,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -48,7 +48,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Setup and Configuration""")
     return
@@ -68,7 +68,7 @@ def _():
     return MedicationAdminIntermittent, Path, np, pd
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Load Cohort""")
     return
@@ -97,7 +97,7 @@ def _(Path, pd):
     return cohort_df, cohort_ids
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Load Antibiotic Spectrum Scoring""")
     return
@@ -136,7 +136,7 @@ def _(pd):
     return abx_spectrum, antibiotic_filter_list
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Load Medication Administration Intermittent""")
     return
@@ -208,7 +208,7 @@ def _(antibiotic_filter_list, meds_intermittent_df):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Filter to ICU Stay Window""")
     return
@@ -239,9 +239,9 @@ def _(cohort_df, meds_intermittent_df, pd):
     return (meds_icu_window,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## Convert to Polars for Performance""")
+    mo.md(r"""## Prepare Data for Analysis""")
     return
 
 
@@ -253,15 +253,14 @@ def _():
     import matplotlib.pyplot as plt
     import scipy.interpolate
 
-    print("Converting to Polars for optimized processing...")
-    print("Loading visualization libraries...")
+    print("Loading analysis libraries...")
     return pl, plt, scipy, timedelta, tqdm
 
 
 @app.cell
 def _(cohort_df, meds_icu_window, pl):
-    # Convert to Polars
-    print("Converting DataFrames to Polars...")
+    # Prepare data structures
+    print("Preparing data for analysis...")
 
     # Cohort
     cohort_pl = pl.DataFrame(cohort_df)
@@ -269,46 +268,13 @@ def _(cohort_df, meds_icu_window, pl):
     # Medications
     meds_pl = pl.DataFrame(meds_icu_window)
 
-    print(f"✓ Converted to Polars")
+    print(f"✓ Data prepared")
     print(f"  Cohort shape: {cohort_pl.shape}")
     print(f"  Medications shape: {meds_pl.shape}")
     return cohort_pl, meds_pl
 
 
-@app.cell
-def _(mo):
-    mo.md(
-        r"""
-    ## Understanding DOT Calculation
-
-    ### Key Concept: 24-Hour Windows
-    We divide each ICU stay into consecutive 24-hour windows starting from `start_dttm`:
-    - Window 1: Day 0 (00:00 - 23:59)
-    - Window 2: Day 1 (00:00 - 23:59)
-    - ...
-    - Last Window: Capped at `end_dttm` (may be < 24 hours)
-
-    ### DOT Counting Rules
-    For each antibiotic in each 24-hour window:
-    - If ≥1 dose administered (non-null `med_dose`) → DOT = 1
-    - If 0 doses → DOT = 0
-
-    ### Example
-    Patient receives antibiotics over 3 days:
-    - Day 0: Vancomycin (2 doses), Piperacillin-Tazobactam (1 dose)
-    - Day 1: Vancomycin (1 dose)
-    - Day 2: No antibiotics
-
-    **Result:**
-    - Vancomycin DOT = 2 (Days 0, 1)
-    - Piperacillin-Tazobactam DOT = 1 (Day 0)
-    - Antibiotic-Free Days = 1 (Day 2)
-    """
-    )
-    return
-
-
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Create 24-Hour Windows""")
     return
@@ -360,43 +326,30 @@ def _(cohort_pl, pl, timedelta, tqdm):
     return (windows_pl,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
     ## Calculate DOT per Antibiotic
 
     ### Overview
-    This section calculates **Days of Therapy (DOT)** for each antibiotic for each hospitalization by checking every 24-hour window to see if the antibiotic was administered.
+    For each hospitalization, we calculate **Days of Therapy (DOT)** for each antibiotic by counting how many 24-hour windows contain at least one dose of that antibiotic.
 
-    ### Algorithm Structure
-    This uses a **triple-nested loop** approach:
-    ```
-    For each hospitalization:
-        For each 24-hour window in that hospitalization:
-            For each antibiotic in the reference table:
-                Check if ≥1 dose with non-null med_dose exists in this window
-                If yes → increment DOT counter for that antibiotic
-    ```
+    ### What is a "Day"?
+    A "day" is defined as a 24-hour window starting from ICU admission. For example:
+    - Window 0 = First 24 hours (ICU Day 0)
+    - Window 1 = Second 24 hours (ICU Day 1)
+    - And so on...
 
-    ### Inputs
-    - **`windows_pl`**: All 24-hour windows across all hospitalizations
-    - **`meds_pl`**: All antibiotic administrations (filtered to ICU windows)
-    - **`abx_spectrum`**: Reference table of all antibiotics to track
+    If an antibiotic is given at any time during a window, that counts as 1 day of therapy for that antibiotic.
 
-    ### Processing Strategy
-    1. **Group windows by hospitalization** for efficient filtering
-    2. **Filter medications per hospitalization** to reduce search space
-    3. **Check each window-antibiotic combination** for doses
-    4. **Track antibiotic-free days** (windows with zero antibiotics)
+    ### Antibiotic-Free Days
+    We also track days where no antibiotics were given. This helps measure antibiotic stewardship.
 
-    ### Output: Patient-Level DOT Table
-    Long-format table with three columns:
-    - `hospitalization_id`: Patient identifier
-    - `antibiotic`: Antibiotic name (or 'ANTIBIOTIC_FREE')
-    - `dot`: Number of days that antibiotic was given
+    ### Output Format
+    Patient-level table showing DOT for each antibiotic:
 
-    **Example output:**
+    **Example:**
     ```
     hospitalization_id | antibiotic              | dot
     -------------------|-------------------------|----
@@ -405,18 +358,8 @@ def _(mo):
     12345             | ANTIBIOTIC_FREE         | 2
     67890             | Ceftriaxone             | 1
     ```
-     The code counts number of windows as Patient-Days:
-      - 7-hour stay → 1 PD (should be 0.29 PD if fractional)
-      - 23-hour stay → 1 PD (should be 0.96 PD if fractional)
-      - 25-hour stay → 2 PD (26-hour window + 23-hour window)
 
-    ### Performance Note
-    This is the **most computationally intensive section** due to:
-    - Nested loops over hospitalizations × windows × antibiotics
-    - Repeated filtering operations
-    - Large datasets (potentially thousands of hospitalizations × hundreds of antibiotics)
-
-    **Progress tracking:** `tqdm` provides progress bars to monitor completion.
+    This means patient 12345 received Vancomycin for 5 days, Piperacillin-Tazobactam for 3 days, and had 2 days without any antibiotics during their ICU stay.
     """
     )
     return
@@ -622,7 +565,7 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
     return daily_asc_patient_level, dot_hospital_level
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -725,7 +668,7 @@ def _(abx_spectrum, dot_hospital_level, pl):
     return (dot_antibiotic_level,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -841,7 +784,7 @@ def _(cohort_df, dot_hospital_level, pl):
     return dot_cohort_level, dot_location_type_level
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -917,7 +860,7 @@ def _(daily_asc_patient_level, pl):
     return (daily_asc_summary,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -1045,7 +988,7 @@ def _(cohort_df, daily_asc_patient_level, dot_hospital_level, pl):
     return dasc_by_year, dasc_overall
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -1055,7 +998,7 @@ def _(mo):
     This section calculates **Antibiotic-Free Days (AFD)**, which is the ratio of days without any antibiotic administration to total ICU days for each hospitalization.
 
     ### Key Concept
-    **Antibiotic-Free Days** were already counted during the DOT calculation loop (lines 516-517) and stored in the `ANTIBIOTIC_FREE` column of `dot_hospital_level`.
+    **Antibiotic-Free Days** were already counted during the DOT calculation and stored in the `ANTIBIOTIC_FREE` column.
 
     ### Formula
     ```
@@ -1101,7 +1044,6 @@ def _(dot_hospital_level, pl):
     print("Calculating Antibiotic-Free Days (AFD) Rate...")
 
     # Extract relevant columns from dot_hospital_level
-    # ANTIBIOTIC_FREE column was created during DOT calculation (lines 554-558)
     afd_patient_level = (
         dot_hospital_level
         .select([
@@ -1156,7 +1098,7 @@ def _(dot_hospital_level, pl):
     return afd_patient_level, afd_summary
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(
         r"""
@@ -1169,7 +1111,6 @@ def _(mo):
     - Track ASC trends over time to identify changes in antibiotic prescribing patterns
     - Enable cross-site comparison of ASC evolution across healthcare centers
     - Support generation of time series plots showing ASC trajectories by year
-    - Provide data for the plot shown in research image: "Antibiotic Spectrum Score by Healthcare Center Over Time"
 
     ### Method
     1. Join `daily_asc_patient_level` (window-level ASC data) with `windows_pl` (window timestamps)
@@ -1195,12 +1136,6 @@ def _(mo):
     2019 |   4.68   |  3.34  |   18,567  |       1,512
     2020 |   5.12   |  3.58  |   20,123  |       1,678
     ```
-
-    ### Context: Single-Site Analysis
-    - This analysis produces ONE site's ASC trend data
-    - Sites share their `asc_by_year_summary.parquet` files for comparison
-    - When combined, creates multi-site time series comparison plots
-    - Each site appears as one line/trend in the final visualization
     """
     )
     return
@@ -1260,7 +1195,7 @@ def _(daily_asc_patient_level, pl, windows_pl):
     return (asc_by_year_summary,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Save Results""")
     return
@@ -1360,84 +1295,12 @@ def _(
 
     print(f"\n✓ All results saved successfully!")
     print(f"\n{'='*80}")
-    print(f"=== SUMMARY OF OUTPUT FILES ===")
-    print(f"{'='*80}")
-
-    print(f"\n📁 PHI_DATA/ (3 files - PATIENT-LEVEL DATA - DO NOT SHARE)")
-    print(f"   Contains hospitalization_id - keep confidential")
-    print(f"   ----------------------------------------")
-    print(f"   1. dot_hospital_level.parquet")
-    print(f"      → DOT per antibiotic per hospitalization (wide format)")
-    print(f"   2. daily_asc_patient_level.parquet")
-    print(f"      → Daily ASC per hospitalization per window")
-    print(f"   3. afd_patient_level.parquet")
-    print(f"      → AFD rate per hospitalization")
-
-    print(f"\n📤 RESULTS_UPLOAD_ME/ (8 files - SUMMARY DATA - SAFE TO SHARE)")
-    print(f"   No patient identifiers - aggregate metrics only - CSV format")
-    print(f"   ----------------------------------------")
-    print(f"\n   DOT Metrics:")
-    print(f"   4. dot_antibiotic_level.csv")
-    print(f"      → DOT per 1000 PD by antibiotic")
-    print(f"   5. dot_cohort_level.csv")
-    print(f"      → Overall cohort DOT metrics")
-    print(f"   6. dot_location_type_level.csv")
-    print(f"      → DOT metrics by ICU location type")
-    print(f"\n   ASC/DASC Metrics:")
-    print(f"   7. daily_asc_summary.csv")
-    print(f"      → Mean/SD ASC per window (days 0-10)")
-    print(f"   8. dasc_overall.csv")
-    print(f"      → Overall DASC metrics")
-    print(f"   9. dasc_by_year.csv")
-    print(f"      → DASC metrics by year (2018-2024)")
-    print(f"   11. asc_by_year_summary.csv")
-    print(f"      → ASC summary by year for time series plotting")
-    print(f"\n   AFD Metrics:")
-    print(f"   10. afd_summary.csv")
-    print(f"      → Mean/SD of AFD rates")
-
-    print(f"\n{'='*80}")
-    print(f"✅ UPLOAD ONLY THE RESULTS_UPLOAD_ME/ FOLDER FOR CROSS-SITE COMPARISON")
-    print(f"{'='*80}")
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-    ## Visualizations: ASC Time Series Plots
-
-    ### Overview
-    This section creates publication-quality visualizations of Antibiotic Spectrum Coverage (ASC) trends using **spline interpolation** for smooth curves.
-
-    ### Plots Generated
-
-    **1. ASC Trend by Year (2018-2024)**
-    - Shows how ASC evolves across years
-    - Identifies temporal trends in antibiotic prescribing patterns
-    - Useful for comparing with other healthcare centers
-
-    **2. ASC Trend by ICU Day (Days 0-10)**
-    - Shows ASC trajectory during early ICU stay
-    - Identifies escalation/de-escalation patterns
-    - Captures initial empiric therapy vs. subsequent adjustments
-
-    ### Technical Details
-    - **Interpolation**: Cubic B-spline (scipy.interpolate.make_interp_spline)
-    - **Error bands**: Mean ± Standard Deviation (shaded regions)
-    - **Resolution**: 500 interpolated points for smooth curves
-    - **Output format**: PNG (300 DPI for publication quality)
-    - **Location**: RESULTS_UPLOAD_ME/ folder (safe to share)
-
-    ### Interpretation
-    - **Line**: Mean ASC across all patients
-    - **Shaded band**: Variability (±1 SD)
-    - **Wider bands**: Higher inter-patient variability
-    - **Upward slope**: Increasing spectrum coverage (escalation)
-    - **Downward slope**: Decreasing spectrum coverage (de-escalation)
-    """
-    )
+    mo.md(r"""## Visualizations: ASC Time Series Plots""")
     return
 
 
@@ -1591,8 +1454,348 @@ def _(Path, daily_asc_summary, np, plt, scipy):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## Generate Table 1: Summary Statistics for Multi-Site Comparison""")
+    return
+
+
 @app.cell
-def _():
+def _(
+    Path,
+    afd_summary,
+    cohort_df,
+    daily_asc_summary,
+    dasc_overall,
+    dot_antibiotic_level,
+    dot_cohort_level,
+    pl,
+):
+    import json
+
+    print("Generating Table 1 summary statistics...")
+
+    # ============================================================
+    # DEMOGRAPHICS & BASELINE
+    # ============================================================
+
+    cohort_pl_t1 = pl.DataFrame(cohort_df)
+
+    t1_total_patients = len(cohort_pl_t1)
+    t1_total_pd = cohort_pl_t1.with_columns(
+        ((pl.col('end_dttm') - pl.col('start_dttm')).dt.total_seconds() / 86400).alias('icu_los_days')
+    )
+
+    # Calculate demographics
+    t1_mean_age = cohort_pl_t1['age_at_admission'].mean() if 'age_at_admission' in cohort_pl_t1.columns else None
+    t1_sd_age = cohort_pl_t1['age_at_admission'].std() if 'age_at_admission' in cohort_pl_t1.columns else None
+
+    # Sex
+    t1_pct_female = None
+    t1_n_female = None
+    if 'sex_category' in cohort_pl_t1.columns:
+        t1_n_female = cohort_pl_t1.filter(pl.col('sex_category') == 'Female').shape[0]
+        t1_pct_female = (t1_n_female / t1_total_patients * 100)
+
+    # Race/Ethnicity breakdown
+    t1_race_ethnicity_counts = {}
+    if 'race_ethnicity' in cohort_pl_t1.columns:
+        race_groups = cohort_pl_t1.group_by('race_ethnicity').agg(pl.count().alias('n'))
+        for t1_row in race_groups.iter_rows(named=True):
+            t1_race_ethnicity_counts[t1_row['race_ethnicity']] = {
+                'n': t1_row['n'],
+                'pct': (t1_row['n'] / t1_total_patients * 100)
+            }
+
+    # ICU LOS
+    t1_mean_icu_los = cohort_pl_t1['icu_los_days'].mean()
+    t1_sd_icu_los = cohort_pl_t1['icu_los_days'].std()
+
+    # Hospital LOS
+    t1_mean_hospital_los = cohort_pl_t1['hospital_los_days'].mean()
+    t1_sd_hospital_los = cohort_pl_t1['hospital_los_days'].std()
+
+    # Clinical characteristics
+    t1_mean_highest_temp = cohort_pl_t1['highest_temperature'].mean()
+    t1_sd_highest_temp = cohort_pl_t1['highest_temperature'].std()
+
+    t1_mean_lowest_temp = cohort_pl_t1['lowest_temperature'].mean()
+    t1_sd_lowest_temp = cohort_pl_t1['lowest_temperature'].std()
+
+    t1_mean_lowest_map = cohort_pl_t1['lowest_map'].mean()
+    t1_sd_lowest_map = cohort_pl_t1['lowest_map'].std()
+
+    t1_mean_highest_sofa = cohort_pl_t1['sofa_total'].mean()
+    t1_sd_highest_sofa = cohort_pl_t1['sofa_total'].std()
+
+    # Interventions (n, %)
+    t1_vasopressor_ever_n = cohort_pl_t1['vasopressor_ever'].sum()
+    t1_vasopressor_ever_pct = (t1_vasopressor_ever_n / t1_total_patients * 100)
+
+    t1_nippv_ever_n = cohort_pl_t1['NIPPV_ever'].sum()
+    t1_nippv_ever_pct = (t1_nippv_ever_n / t1_total_patients * 100)
+
+    t1_hfno_ever_n = cohort_pl_t1['HFNO_ever'].sum()
+    t1_hfno_ever_pct = (t1_hfno_ever_n / t1_total_patients * 100)
+
+    # Labs
+    t1_mean_highest_wbc = cohort_pl_t1['highest_wbc'].mean()
+    t1_sd_highest_wbc = cohort_pl_t1['highest_wbc'].std()
+
+    t1_mean_highest_cr = cohort_pl_t1['highest_creatinine'].mean()
+    t1_sd_highest_cr = cohort_pl_t1['highest_creatinine'].std()
+
+    # Outcomes
+    t1_inpatient_mortality_n = cohort_pl_t1['inpatient_mortality'].sum()
+    t1_inpatient_mortality_pct = (t1_inpatient_mortality_n / t1_total_patients * 100)
+
+    t1_icu_mortality_n = cohort_pl_t1['icu_mortality'].sum()
+    t1_icu_mortality_pct = (t1_icu_mortality_n / t1_total_patients * 100)
+
+    # ============================================================
+    # ANTIBIOTIC METRICS
+    # ============================================================
+
+    # Top 15 antibiotics by DOT per 1000 PD
+    t1_top_antibiotics = (
+        dot_antibiotic_level
+        .sort('dot_per_1000_pd', descending=True)
+        .head(15)
+        .select(['antibiotic', 'dot_per_1000_pd'])
+    )
+
+    # Overall DOT per 1000 PD
+    t1_overall_dot_per_1000_pd = dot_cohort_level.filter(
+        pl.col('metric') == 'Overall DOT per 1000 PD'
+    )['value'][0]
+
+    # Daily ASC scores (Days 0-10)
+    t1_daily_asc_dict = {}
+    for t1_row in daily_asc_summary.iter_rows(named=True):
+        t1_day = int(t1_row['window_num'])
+        t1_daily_asc_dict[f'day_{t1_day}_mean'] = float(t1_row['mean_asc'])
+        t1_daily_asc_dict[f'day_{t1_day}_sd'] = float(t1_row['sd_asc'])
+
+    # DASC per 1000 PD
+    t1_dasc_per_1000_pd = dasc_overall.filter(
+        pl.col('metric') == 'DASC per 1000 PD'
+    )['value'][0]
+
+    # AFD metrics
+    t1_afd_mean_rate = afd_summary.filter(pl.col('metric') == 'mean_afd_rate')['value'][0]
+    t1_afd_sd_rate = afd_summary.filter(pl.col('metric') == 'std_afd_rate')['value'][0]
+    t1_afd_mean_pct = t1_afd_mean_rate * 100  # Convert to percentage
+
+    # Total patient-days
+    t1_total_patient_days = dot_cohort_level.filter(
+        pl.col('metric') == 'Total PD'
+    )['value'][0]
+
+    # ============================================================
+    # BUILD TABLE 1 STRUCTURE (JSON)
+    # ============================================================
+
+    t1_table1_data = {
+        "site_id": "SITE_NAME_PLACEHOLDER",  # Sites should replace this
+        "demographics": {
+            "total_patients": int(t1_total_patients),
+            "age_mean": float(t1_mean_age) if t1_mean_age is not None else "NOT_AVAILABLE",
+            "age_sd": float(t1_sd_age) if t1_sd_age is not None else "NOT_AVAILABLE",
+            "bmi_mean": "NOT_AVAILABLE",
+            "bmi_sd": "NOT_AVAILABLE",
+            "sex_female_n": int(t1_n_female) if t1_n_female is not None else "NOT_AVAILABLE",
+            "sex_female_pct": float(t1_pct_female) if t1_pct_female is not None else "NOT_AVAILABLE",
+            "race_ethnicity": t1_race_ethnicity_counts,
+            "icu_los_mean_days": float(t1_mean_icu_los),
+            "icu_los_sd_days": float(t1_sd_icu_los),
+            "hospital_los_mean_days": float(t1_mean_hospital_los),
+            "hospital_los_sd_days": float(t1_sd_hospital_los)
+        },
+        "clinical_characteristics": {
+            "highest_temperature_mean": float(t1_mean_highest_temp),
+            "highest_temperature_sd": float(t1_sd_highest_temp),
+            "lowest_temperature_mean": float(t1_mean_lowest_temp),
+            "lowest_temperature_sd": float(t1_sd_lowest_temp),
+            "lowest_map_mean": float(t1_mean_lowest_map),
+            "lowest_map_sd": float(t1_sd_lowest_map),
+            "highest_sofa_mean": float(t1_mean_highest_sofa),
+            "highest_sofa_sd": float(t1_sd_highest_sofa),
+            "vasopressor_ever_n": int(t1_vasopressor_ever_n),
+            "vasopressor_ever_pct": float(t1_vasopressor_ever_pct),
+            "nippv_ever_n": int(t1_nippv_ever_n),
+            "nippv_ever_pct": float(t1_nippv_ever_pct),
+            "hfno_ever_n": int(t1_hfno_ever_n),
+            "hfno_ever_pct": float(t1_hfno_ever_pct),
+            "cvvh_n": "NOT_AVAILABLE",
+            "cvvh_pct": "NOT_AVAILABLE",
+            "highest_wbc_mean": float(t1_mean_highest_wbc),
+            "highest_wbc_sd": float(t1_sd_highest_wbc),
+            "highest_creatinine_mean": float(t1_mean_highest_cr),
+            "highest_creatinine_sd": float(t1_sd_highest_cr)
+        },
+        "antibiotic_metrics": {
+            "top_antibiotics_dot_per_1000_pd": {
+                t1_row['antibiotic']: float(t1_row['dot_per_1000_pd'])
+                for t1_row in t1_top_antibiotics.iter_rows(named=True)
+            },
+            "overall_dot_per_1000_pd": float(t1_overall_dot_per_1000_pd),
+            "daily_asc_scores": t1_daily_asc_dict,
+            "dasc_per_1000_pd": float(t1_dasc_per_1000_pd),
+            "afd_mean_rate": float(t1_afd_mean_rate),
+            "afd_sd_rate": float(t1_afd_sd_rate),
+            "afd_mean_pct_of_icu_days": float(t1_afd_mean_pct)
+        },
+        "outcomes": {
+            "total_patient_days": int(t1_total_patient_days),
+            "hospital_los_mean_days": float(t1_mean_hospital_los),
+            "hospital_los_sd_days": float(t1_sd_hospital_los),
+            "icu_los_mean_days": float(t1_mean_icu_los),
+            "icu_los_sd_days": float(t1_sd_icu_los),
+            "inpatient_mortality_n": int(t1_inpatient_mortality_n),
+            "inpatient_mortality_pct": float(t1_inpatient_mortality_pct),
+            "icu_mortality_n": int(t1_icu_mortality_n),
+            "icu_mortality_pct": float(t1_icu_mortality_pct)
+        }
+    }
+
+    # ============================================================
+    # SAVE AS JSON (for aggregation)
+    # ============================================================
+
+    t1_json_path = Path('RESULTS_UPLOAD_ME') / 'table1_summary.json'
+    with open(t1_json_path, 'w') as f:
+        json.dump(t1_table1_data, f, indent=2)
+
+    print(f"\n✓ Saved JSON: {t1_json_path}")
+
+    # ============================================================
+    # BUILD TABLE 1 AS CSV (for viewing)
+    # ============================================================
+
+    t1_table1_rows = []
+
+    # Demographics section
+    t1_table1_rows.append({'Category': 'DEMOGRAPHICS', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'N (total patients)', 'Value': str(t1_total_patients), 'Notes': ''})
+
+    if t1_mean_age is not None:
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Age (mean, SD)',
+                           'Value': f"{t1_mean_age:.1f} ± {t1_sd_age:.1f}", 'Notes': ''})
+    else:
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Age (mean, SD)',
+                           'Value': 'NOT AVAILABLE', 'Notes': ''})
+
+    if t1_n_female is not None:
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Sex, female (n, %)',
+                           'Value': f"{t1_n_female} ({t1_pct_female:.1f}%)", 'Notes': ''})
+
+    # BMI
+    t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'BMI (first value in hospitalization, mean SD)',
+                       'Value': 'NOT AVAILABLE', 'Notes': ''})
+
+    # Race/Ethnicity
+    if t1_race_ethnicity_counts:
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Race ethnicity, n %', 'Value': '', 'Notes': ''})
+        for t1_race_cat in ['Hispanic', 'Non-Hispanic White', 'Non-Hispanic Black', 'Non-Hispanic Asian', 'Other', 'Not Reported']:
+            if t1_race_cat in t1_race_ethnicity_counts:
+                t1_n = t1_race_ethnicity_counts[t1_race_cat]['n']
+                t1_pct = t1_race_ethnicity_counts[t1_race_cat]['pct']
+                t1_table1_rows.append({'Category': 'Demographics', 'Variable': f'  {t1_race_cat}',
+                                   'Value': f"{t1_n} ({t1_pct:.1f}%)", 'Notes': ''})
+            else:
+                t1_table1_rows.append({'Category': 'Demographics', 'Variable': f'  {t1_race_cat}',
+                                   'Value': '0 (0.0%)', 'Notes': ''})
+
+    # Clinical characteristics section
+    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'CLINICAL CHARACTERISTICS', 'Variable': '', 'Value': '', 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Highest temperature (mean, SD)',
+                       'Value': f"{t1_mean_highest_temp:.1f} ± {t1_sd_highest_temp:.1f}", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Lowest temperature (mean, SD)',
+                       'Value': f"{t1_mean_lowest_temp:.1f} ± {t1_sd_lowest_temp:.1f}", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Lowest mean arterial pressure (mean, SD)',
+                       'Value': f"{t1_mean_lowest_map:.1f} ± {t1_sd_lowest_map:.1f}", 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'Severity', 'Variable': 'Highest ICU SOFA score (mean, SD)',
+                       'Value': f"{t1_mean_highest_sofa:.1f} ± {t1_sd_highest_sofa:.1f}", 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'Vasopressor_ever (n, %)',
+                       'Value': f"{t1_vasopressor_ever_n} ({t1_vasopressor_ever_pct:.1f}%)", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'NIPPV_ever (n, %)',
+                       'Value': f"{t1_nippv_ever_n} ({t1_nippv_ever_pct:.1f}%)", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'HFNO_ever (n, %)',
+                       'Value': f"{t1_hfno_ever_n} ({t1_hfno_ever_pct:.1f}%)", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'CVVH (non missing and > 0 blood_flow) (n, %)',
+                       'Value': 'NOT AVAILABLE', 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'Labs', 'Variable': 'Highest WBC (mean, sd)',
+                       'Value': f"{t1_mean_highest_wbc:.1f} ± {t1_sd_highest_wbc:.1f}", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Labs', 'Variable': 'Highest_Cr (mean, sd)',
+                       'Value': f"{t1_mean_highest_cr:.2f} ± {t1_sd_highest_cr:.2f}", 'Notes': ''})
+
+    # Antibiotic metrics section
+    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'ANTIBIOTIC METRICS', 'Variable': '', 'Value': '', 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'Antibiotics', 'Variable': 'Common antibiotics prescribed (DOT per 1000 PD)',
+                       'Value': '', 'Notes': 'Top 15'})
+
+    for t1_row in t1_top_antibiotics.iter_rows(named=True):
+        t1_table1_rows.append({'Category': 'Antibiotics',
+                           'Variable': f"  {t1_row['antibiotic']}",
+                           'Value': f"{t1_row['dot_per_1000_pd']:.2f}",
+                           'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'Antibiotics', 'Variable': 'DOT per 1000 patient days (all antibiotics in excel)',
+                       'Value': f"{t1_overall_dot_per_1000_pd:.2f}", 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'ASC Scores', 'Variable': 'Antibiotic Spectrum Scores (mean, SD per day)',
+                       'Value': '', 'Notes': ''})
+
+    for t1_day in range(11):  # Days 0-10
+        t1_mean_key = f'day_{t1_day}_mean'
+        t1_sd_key = f'day_{t1_day}_sd'
+        if t1_mean_key in t1_daily_asc_dict:
+            t1_table1_rows.append({'Category': 'ASC Scores',
+                               'Variable': f"  Day {t1_day} ASC score",
+                               'Value': f"{t1_daily_asc_dict[t1_mean_key]:.2f} ± {t1_daily_asc_dict[t1_sd_key]:.2f}",
+                               'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'ASC Scores', 'Variable': 'DASC (days of ASC) per 1000 PD',
+                       'Value': f"{t1_dasc_per_1000_pd:.2f}", 'Notes': ''})
+
+    t1_table1_rows.append({'Category': 'AFD', 'Variable': 'Antibiotic-Free Days (mean % of ICU days)',
+                       'Value': f"{t1_afd_mean_pct:.1f}%", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'AFD', 'Variable': 'AFD rate (mean ± SD)',
+                       'Value': f"{t1_afd_mean_rate:.3f} ± {t1_afd_sd_rate:.3f}", 'Notes': ''})
+
+    # Outcomes section
+    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'OUTCOMES', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'Total patient-days',
+                       'Value': f"{int(t1_total_patient_days):,}", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'Hospital LOS (mean, SD) days',
+                       'Value': f"{t1_mean_hospital_los:.1f} ± {t1_sd_hospital_los:.1f}", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'ICU LOS of index (mean, SD) days',
+                       'Value': f"{t1_mean_icu_los:.1f} ± {t1_sd_icu_los:.1f}", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'Inpatient mortality (n, %)',
+                       'Value': f"{t1_inpatient_mortality_n} ({t1_inpatient_mortality_pct:.1f}%)", 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'ICU mortality (n, %)',
+                       'Value': f"{t1_icu_mortality_n} ({t1_icu_mortality_pct:.1f}%)", 'Notes': ''})
+
+    # Convert to DataFrame and save
+    t1_table1_df = pl.DataFrame(t1_table1_rows)
+
+    t1_csv_path = Path('RESULTS_UPLOAD_ME') / 'table1_summary.csv'
+    t1_table1_df.write_csv(t1_csv_path)
+
+    print(f"✓ Saved CSV: {t1_csv_path}")
+    print(f"\n=== Table 1 Summary ===")
+    print(f"Total patients: {t1_total_patients:,}")
+    print(f"Total patient-days: {int(t1_total_patient_days):,}")
+    print(f"Top antibiotic: {t1_top_antibiotics['antibiotic'][0]} (DOT per 1000 PD: {t1_top_antibiotics['dot_per_1000_pd'][0]:.2f})")
+    print(f"\n✓ Table 1 generation complete!")
     return
 
 
