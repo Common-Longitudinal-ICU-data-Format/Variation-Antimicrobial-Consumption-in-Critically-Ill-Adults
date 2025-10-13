@@ -61,11 +61,18 @@ def _():
     from clifpy.tables import MedicationAdminIntermittent
     from pathlib import Path
     import warnings
+    import json
     warnings.filterwarnings('ignore')
 
     print("=== Days of Therapy (DOT) Analysis ===")
     print("Setting up environment...")
-    return MedicationAdminIntermittent, Path, np, pd
+
+    # Load site name from config
+    with open('clif_config.json', 'r') as f:
+        config = json.load(f)
+    site_name = config.get('site', 'UNKNOWN_SITE')
+    print(f"Site: {site_name}")
+    return MedicationAdminIntermittent, Path, json, np, pd, site_name
 
 
 @app.cell(hide_code=True)
@@ -642,8 +649,8 @@ def _(abx_spectrum, dot_hospital_level, pl):
             'total_dot': total_dot,
             'total_pd': total_pd,
             'dot_per_1000_pd': dot_per_1000_pd,
-            'hospitalizations_with_antibiotic': hospitalizations_with_abx,
-            'percent_hospitalizations': percent_hospitalizations
+            'n_any_antibiotic_during_hospitalization': hospitalizations_with_abx,
+            'pct_any_antibiotic_during_hospitalization': percent_hospitalizations
         })
 
     # Create DataFrame
@@ -746,11 +753,11 @@ def _(cohort_df, dot_hospital_level, pl):
 
     total_dot_cohort = dot_with_total['total_dot'].sum()
     total_pd_cohort = dot_with_total['PD'].sum()
-    overall_dot_per_1000_pd_cohort = (total_dot_cohort / total_pd_cohort) * 1000
+    overall_dot_per_1000_pd_cohort = round((total_dot_cohort / total_pd_cohort) * 1000, 3)
 
     print(f"Total DOT (all antibiotics, all hospitalizations): {total_dot_cohort:,}")
     print(f"Total PD (all hospitalizations): {total_pd_cohort:,}")
-    print(f"Overall DOT per 1000 PD: {overall_dot_per_1000_pd_cohort:.2f}")
+    print(f"Overall DOT per 1000 PD: {overall_dot_per_1000_pd_cohort:.3f}")
 
     # Create cohort-level DataFrame
     dot_cohort_level = pl.DataFrame({
@@ -846,9 +853,16 @@ def _(daily_asc_patient_level, pl):
             pl.col('daily_asc').mean().alias('mean_asc'),
             pl.col('daily_asc').std().alias('sd_asc'),
             pl.col('daily_asc').median().alias('median_asc'),
+            pl.col('daily_asc').quantile(0.25).alias('q25_asc'),
+            pl.col('daily_asc').quantile(0.75).alias('q75_asc'),
             pl.col('daily_asc').min().alias('min_asc'),
             pl.col('daily_asc').max().alias('max_asc'),
             pl.col('hospitalization_id').count().alias('n_hospitalizations')
+        ])
+        .with_columns([
+            (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt()).alias('se_asc'),
+            (pl.col('mean_asc') - 1.96 * (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt())).alias('lower_ci_asc'),
+            (pl.col('mean_asc') + 1.96 * (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt())).alias('upper_ci_asc')
         ])
         .sort('window_num')
     )
@@ -977,7 +991,7 @@ def _(cohort_df, daily_asc_patient_level, dot_hospital_level, pl):
             pl.col('hospitalization_id').count().alias('hospitalizations')
         ])
         .with_columns(
-            ((pl.col('total_dasc') / pl.col('total_pd')) * 1000).alias('dasc_per_1000_pd')
+            ((pl.col('total_dasc') / pl.col('total_pd')) * 1000).round(3).alias('dasc_per_1000_pd')
         )
         .sort('year')
     )
@@ -1064,12 +1078,21 @@ def _(dot_hospital_level, pl):
     median_afd_rate = afd_patient_level['afd_rate'].median()
     min_afd_rate = afd_patient_level['afd_rate'].min()
     max_afd_rate = afd_patient_level['afd_rate'].max()
+    q25_afd_rate = afd_patient_level['afd_rate'].quantile(0.25)
+    q75_afd_rate = afd_patient_level['afd_rate'].quantile(0.75)
     total_hospitalizations_afd = len(afd_patient_level)
+
+    # Calculate standard error
+    import math
+    se_afd_rate = std_afd_rate / math.sqrt(total_hospitalizations_afd)
 
     print(f"\n=== Antibiotic-Free Days (AFD) Summary ===")
     print(f"  Mean AFD Rate: {mean_afd_rate:.4f} ({mean_afd_rate*100:.2f}%)")
     print(f"  SD AFD Rate: {std_afd_rate:.4f}")
+    print(f"  SE AFD Rate: {se_afd_rate:.4f}")
     print(f"  Median AFD Rate: {median_afd_rate:.4f} ({median_afd_rate*100:.2f}%)")
+    print(f"  25th Percentile: {q25_afd_rate:.4f} ({q25_afd_rate*100:.2f}%)")
+    print(f"  75th Percentile: {q75_afd_rate:.4f} ({q75_afd_rate*100:.2f}%)")
     print(f"  Min AFD Rate: {min_afd_rate:.4f} ({min_afd_rate*100:.2f}%)")
     print(f"  Max AFD Rate: {max_afd_rate:.4f} ({max_afd_rate*100:.2f}%)")
     print(f"  Total Hospitalizations: {total_hospitalizations_afd:,}")
@@ -1079,7 +1102,10 @@ def _(dot_hospital_level, pl):
         'metric': [
             'mean_afd_rate',
             'std_afd_rate',
+            'se_afd_rate',
             'median_afd_rate',
+            'q25_afd_rate',
+            'q75_afd_rate',
             'min_afd_rate',
             'max_afd_rate',
             'total_hospitalizations'
@@ -1087,7 +1113,10 @@ def _(dot_hospital_level, pl):
         'value': [
             float(mean_afd_rate),
             float(std_afd_rate),
+            float(se_afd_rate),
             float(median_afd_rate),
+            float(q25_afd_rate),
+            float(q75_afd_rate),
             float(min_afd_rate),
             float(max_afd_rate),
             float(total_hospitalizations_afd)
@@ -1177,10 +1206,17 @@ def _(daily_asc_patient_level, pl, windows_pl):
             pl.col('daily_asc').mean().alias('mean_asc'),
             pl.col('daily_asc').std().alias('sd_asc'),
             pl.col('daily_asc').median().alias('median_asc'),
+            pl.col('daily_asc').quantile(0.25).alias('q25_asc'),
+            pl.col('daily_asc').quantile(0.75).alias('q75_asc'),
             pl.col('daily_asc').min().alias('min_asc'),
             pl.col('daily_asc').max().alias('max_asc'),
             pl.col('window_num').count().alias('n_windows'),
             pl.col('hospitalization_id').n_unique().alias('n_hospitalizations')
+        ])
+        .with_columns([
+            (pl.col('sd_asc') / pl.col('n_windows').sqrt()).alias('se_asc'),
+            (pl.col('mean_asc') - 1.96 * (pl.col('sd_asc') / pl.col('n_windows').sqrt())).alias('lower_ci_asc'),
+            (pl.col('mean_asc') + 1.96 * (pl.col('sd_asc') / pl.col('n_windows').sqrt())).alias('upper_ci_asc')
         ])
         .sort('year')
     )
@@ -1215,6 +1251,8 @@ def _(
     dot_cohort_level,
     dot_hospital_level,
     dot_location_type_level,
+    pl,
+    site_name,
 ):
     # Save results
     print("Saving results...")
@@ -1227,71 +1265,104 @@ def _(
 
     # Save hospital-level DOT table (wide format with PD column)
     print("\n1. Hospital-level DOT table (wide format):")
-    dot_hospital_level.write_parquet(Path('PHI_DATA') / 'dot_hospital_level.parquet')
+    dot_hospital_level_with_site = dot_hospital_level.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site', 'hospitalization_id'] + [col for col in dot_hospital_level.columns if col != 'hospitalization_id'])
+    dot_hospital_level_with_site.write_parquet(Path('PHI_DATA') / 'dot_hospital_level.parquet')
     print(f"   ✓ Saved: PHI_DATA/dot_hospital_level.parquet")
-    print(f"   Shape: {dot_hospital_level.shape}")
+    print(f"   Shape: {dot_hospital_level_with_site.shape}")
 
     # Save daily ASC patient-level data
     print("\n2. Daily ASC patient-level (all windows):")
-    daily_asc_patient_level.write_parquet(Path('PHI_DATA') / 'daily_asc_patient_level.parquet')
+    daily_asc_patient_level_with_site = daily_asc_patient_level.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in daily_asc_patient_level.columns])
+    daily_asc_patient_level_with_site.write_parquet(Path('PHI_DATA') / 'daily_asc_patient_level.parquet')
     print(f"   ✓ Saved: PHI_DATA/daily_asc_patient_level.parquet")
-    print(f"   Shape: {daily_asc_patient_level.shape}")
+    print(f"   Shape: {daily_asc_patient_level_with_site.shape}")
 
     # Save AFD patient-level data
     print("\n3. AFD patient-level (all hospitalizations):")
-    afd_patient_level.write_parquet(Path('PHI_DATA') / 'afd_patient_level.parquet')
+    afd_patient_level_with_site = afd_patient_level.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in afd_patient_level.columns])
+    afd_patient_level_with_site.write_parquet(Path('PHI_DATA') / 'afd_patient_level.parquet')
     print(f"   ✓ Saved: PHI_DATA/afd_patient_level.parquet")
-    print(f"   Shape: {afd_patient_level.shape}")
+    print(f"   Shape: {afd_patient_level_with_site.shape}")
 
     print("\n=== SUMMARY DATA (Safe to Share - Upload These Files) ===")
 
     # Save antibiotic-level metrics
     print("\n4. Antibiotic-level metrics:")
-    dot_antibiotic_level.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_antibiotic_level.csv')
+    dot_antibiotic_level_with_site = dot_antibiotic_level.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in dot_antibiotic_level.columns])
+    dot_antibiotic_level_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_antibiotic_level.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_antibiotic_level.csv")
-    print(f"   Shape: {dot_antibiotic_level.shape}")
+    print(f"   Shape: {dot_antibiotic_level_with_site.shape}")
 
     # Save cohort-level overall metrics
     print("\n5. Cohort-level overall metrics:")
-    dot_cohort_level.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_cohort_level.csv')
+    dot_cohort_level_with_site = dot_cohort_level.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in dot_cohort_level.columns])
+    dot_cohort_level_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_cohort_level.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_cohort_level.csv")
-    print(f"   Shape: {dot_cohort_level.shape}")
+    print(f"   Shape: {dot_cohort_level_with_site.shape}")
 
     # Save location-type-level metrics
     print("\n6. Location-type-level metrics:")
-    dot_location_type_level.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_location_type_level.csv')
+    dot_location_type_level_with_site = dot_location_type_level.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in dot_location_type_level.columns])
+    dot_location_type_level_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_location_type_level.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_location_type_level.csv")
-    print(f"   Shape: {dot_location_type_level.shape}")
+    print(f"   Shape: {dot_location_type_level_with_site.shape}")
 
     # Save daily ASC summary (for sharing)
     print("\n7. Daily ASC summary (windows 0-10, for sharing):")
-    daily_asc_summary.write_csv(Path('RESULTS_UPLOAD_ME') / 'daily_asc_summary.csv')
+    daily_asc_summary_with_site = daily_asc_summary.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in daily_asc_summary.columns])
+    daily_asc_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'daily_asc_summary.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/daily_asc_summary.csv")
-    print(f"   Shape: {daily_asc_summary.shape}")
+    print(f"   Shape: {daily_asc_summary_with_site.shape}")
 
     # Save DASC overall metrics
     print("\n8. DASC overall metrics:")
-    dasc_overall.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_overall.csv')
+    dasc_overall_with_site = dasc_overall.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in dasc_overall.columns])
+    dasc_overall_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_overall.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dasc_overall.csv")
-    print(f"   Shape: {dasc_overall.shape}")
+    print(f"   Shape: {dasc_overall_with_site.shape}")
 
     # Save DASC by year metrics
     print("\n9. DASC by year metrics:")
-    dasc_by_year.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_by_year.csv')
+    dasc_by_year_with_site = dasc_by_year.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in dasc_by_year.columns])
+    dasc_by_year_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_by_year.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dasc_by_year.csv")
-    print(f"   Shape: {dasc_by_year.shape}")
+    print(f"   Shape: {dasc_by_year_with_site.shape}")
 
     # Save AFD summary (for sharing)
     print("\n10. AFD summary (for sharing):")
-    afd_summary.write_csv(Path('RESULTS_UPLOAD_ME') / 'afd_summary.csv')
+    afd_summary_with_site = afd_summary.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in afd_summary.columns])
+    afd_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'afd_summary.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/afd_summary.csv")
-    print(f"   Shape: {afd_summary.shape}")
+    print(f"   Shape: {afd_summary_with_site.shape}")
 
     # Save year-based ASC summary (for time series plotting)
     print("\n11. Year-based ASC summary (for time series plotting):")
-    asc_by_year_summary.write_csv(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_summary.csv')
+    asc_by_year_summary_with_site = asc_by_year_summary.with_columns(
+        pl.lit(site_name).alias('site')
+    ).select(['site'] + [col for col in asc_by_year_summary.columns])
+    asc_by_year_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_summary.csv')
     print(f"   ✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_summary.csv")
-    print(f"   Shape: {asc_by_year_summary.shape}")
+    print(f"   Shape: {asc_by_year_summary_with_site.shape}")
 
     print(f"\n✓ All results saved successfully!")
     print(f"\n{'='*80}")
@@ -1316,6 +1387,12 @@ def _(Path, asc_by_year_summary, np, plt, scipy):
     years = df_year['year'].values
     mean_asc_year = df_year['mean_asc'].values
     sd_asc_year = df_year['sd_asc'].values
+    n_windows_year = df_year['n_windows'].values
+
+    # Calculate 95% CI
+    se_asc_year = sd_asc_year / np.sqrt(n_windows_year)
+    ci_lower_year = mean_asc_year - 1.96 * se_asc_year
+    ci_upper_year = mean_asc_year + 1.96 * se_asc_year
 
     # Create spline interpolation (if enough points)
     if len(years) >= 4:
@@ -1324,14 +1401,18 @@ def _(Path, asc_by_year_summary, np, plt, scipy):
         spline = scipy.interpolate.make_interp_spline(years, mean_asc_year, k=3)
         mean_smooth = spline(years_smooth)
 
-        # Interpolate SD as well for smooth error bands
-        spline_sd = scipy.interpolate.make_interp_spline(years, sd_asc_year, k=3)
-        sd_smooth = spline_sd(years_smooth)
+        # Interpolate CI bounds as well for smooth error bands
+        spline_ci_lower = scipy.interpolate.make_interp_spline(years, ci_lower_year, k=3)
+        ci_lower_smooth = spline_ci_lower(years_smooth)
+
+        spline_ci_upper = scipy.interpolate.make_interp_spline(years, ci_upper_year, k=3)
+        ci_upper_smooth = spline_ci_upper(years_smooth)
     else:
         # Fall back to original data if insufficient points
         years_smooth = years
         mean_smooth = mean_asc_year
-        sd_smooth = sd_asc_year
+        ci_lower_smooth = ci_lower_year
+        ci_upper_smooth = ci_upper_year
 
     # Create figure
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -1339,14 +1420,14 @@ def _(Path, asc_by_year_summary, np, plt, scipy):
     # Plot mean line
     ax.plot(years_smooth, mean_smooth, color='#2E86AB', linewidth=2.5, label='Mean ASC')
 
-    # Plot error band (mean ± SD)
+    # Plot error band (mean ± 95% CI)
     ax.fill_between(
         years_smooth,
-        mean_smooth - sd_smooth,
-        mean_smooth + sd_smooth,
+        ci_lower_smooth,
+        ci_upper_smooth,
         alpha=0.3,
         color='#2E86AB',
-        label='±1 SD'
+        label='±95% CI'
     )
 
     # Plot original data points
@@ -1393,6 +1474,12 @@ def _(Path, daily_asc_summary, np, plt, scipy):
     windows = df_window['window_num'].values
     mean_asc_window = df_window['mean_asc'].values
     sd_asc_window = df_window['sd_asc'].values
+    n_hospitalizations_window = df_window['n_hospitalizations'].values
+
+    # Calculate 95% CI
+    se_asc_window = sd_asc_window / np.sqrt(n_hospitalizations_window)
+    ci_lower_window = mean_asc_window - 1.96 * se_asc_window
+    ci_upper_window = mean_asc_window + 1.96 * se_asc_window
 
     # Create spline interpolation
     if len(windows) >= 4:
@@ -1400,12 +1487,16 @@ def _(Path, daily_asc_summary, np, plt, scipy):
         win_spline = scipy.interpolate.make_interp_spline(windows, mean_asc_window, k=3)
         win_mean_smooth = win_spline(win_windows_smooth)
 
-        win_spline_sd = scipy.interpolate.make_interp_spline(windows, sd_asc_window, k=3)
-        win_sd_smooth = win_spline_sd(win_windows_smooth)
+        win_spline_ci_lower = scipy.interpolate.make_interp_spline(windows, ci_lower_window, k=3)
+        win_ci_lower_smooth = win_spline_ci_lower(win_windows_smooth)
+
+        win_spline_ci_upper = scipy.interpolate.make_interp_spline(windows, ci_upper_window, k=3)
+        win_ci_upper_smooth = win_spline_ci_upper(win_windows_smooth)
     else:
         win_windows_smooth = windows
         win_mean_smooth = mean_asc_window
-        win_sd_smooth = sd_asc_window
+        win_ci_lower_smooth = ci_lower_window
+        win_ci_upper_smooth = ci_upper_window
 
     # Create figure
     win_fig, win_ax = plt.subplots(figsize=(10, 6))
@@ -1413,14 +1504,14 @@ def _(Path, daily_asc_summary, np, plt, scipy):
     # Plot mean line
     win_ax.plot(win_windows_smooth, win_mean_smooth, color='#06A77D', linewidth=2.5, label='Mean ASC')
 
-    # Plot error band (mean ± SD)
+    # Plot error band (mean ± 95% CI)
     win_ax.fill_between(
         win_windows_smooth,
-        win_mean_smooth - win_sd_smooth,
-        win_mean_smooth + win_sd_smooth,
+        win_ci_lower_smooth,
+        win_ci_upper_smooth,
         alpha=0.3,
         color='#06A77D',
-        label='±1 SD'
+        label='±95% CI'
     )
 
     # Plot original data points
@@ -1469,10 +1560,10 @@ def _(
     dasc_overall,
     dot_antibiotic_level,
     dot_cohort_level,
+    json,
     pl,
+    site_name,
 ):
-    import json
-
     print("Generating Table 1 summary statistics...")
 
     # ============================================================
@@ -1482,6 +1573,75 @@ def _(
     cohort_pl_t1 = pl.DataFrame(cohort_df)
 
     t1_total_patients = len(cohort_pl_t1)
+
+    # ============================================================
+    # MISSINGNESS CALCULATIONS
+    # ============================================================
+
+    # Calculate null counts and percentages for all tracked variables
+    # Demographics
+    age_n_missing = cohort_pl_t1['age_at_admission'].is_null().sum() if 'age_at_admission' in cohort_pl_t1.columns else t1_total_patients
+    age_pct_missing = (age_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    sex_n_missing = cohort_pl_t1['sex_category'].is_null().sum() if 'sex_category' in cohort_pl_t1.columns else t1_total_patients
+    sex_pct_missing = (sex_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    race_n_missing = cohort_pl_t1['race_ethnicity'].is_null().sum() if 'race_ethnicity' in cohort_pl_t1.columns else t1_total_patients
+    race_pct_missing = (race_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    bmi_n_missing = cohort_pl_t1['bmi'].is_null().sum() if 'bmi' in cohort_pl_t1.columns else t1_total_patients
+    bmi_pct_missing = (bmi_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    # Vitals
+    highest_temp_n_missing = cohort_pl_t1['highest_temperature'].is_null().sum() if 'highest_temperature' in cohort_pl_t1.columns else t1_total_patients
+    highest_temp_pct_missing = (highest_temp_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    lowest_temp_n_missing = cohort_pl_t1['lowest_temperature'].is_null().sum() if 'lowest_temperature' in cohort_pl_t1.columns else t1_total_patients
+    lowest_temp_pct_missing = (lowest_temp_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    lowest_map_n_missing = cohort_pl_t1['lowest_map'].is_null().sum() if 'lowest_map' in cohort_pl_t1.columns else t1_total_patients
+    lowest_map_pct_missing = (lowest_map_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    # Severity
+    sofa_n_missing = cohort_pl_t1['sofa_total'].is_null().sum() if 'sofa_total' in cohort_pl_t1.columns else t1_total_patients
+    sofa_pct_missing = (sofa_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    # Interventions
+    vasopressor_n_missing = cohort_pl_t1['vasopressor_ever'].is_null().sum() if 'vasopressor_ever' in cohort_pl_t1.columns else t1_total_patients
+    vasopressor_pct_missing = (vasopressor_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    nippv_n_missing = cohort_pl_t1['NIPPV_ever'].is_null().sum() if 'NIPPV_ever' in cohort_pl_t1.columns else t1_total_patients
+    nippv_pct_missing = (nippv_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    hfno_n_missing = cohort_pl_t1['HFNO_ever'].is_null().sum() if 'HFNO_ever' in cohort_pl_t1.columns else t1_total_patients
+    hfno_pct_missing = (hfno_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    cvvh_n_missing = t1_total_patients  # Not available yet
+    cvvh_pct_missing = 100.0
+
+    # Labs
+    wbc_n_missing = cohort_pl_t1['highest_wbc'].is_null().sum() if 'highest_wbc' in cohort_pl_t1.columns else t1_total_patients
+    wbc_pct_missing = (wbc_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    creatinine_n_missing = cohort_pl_t1['highest_creatinine'].is_null().sum() if 'highest_creatinine' in cohort_pl_t1.columns else t1_total_patients
+    creatinine_pct_missing = (creatinine_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    # Outcomes
+    hospital_los_n_missing = cohort_pl_t1['hospital_los_days'].is_null().sum() if 'hospital_los_days' in cohort_pl_t1.columns else t1_total_patients
+    hospital_los_pct_missing = (hospital_los_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    icu_los_n_missing = cohort_pl_t1['icu_los_days'].is_null().sum() if 'icu_los_days' in cohort_pl_t1.columns else t1_total_patients
+    icu_los_pct_missing = (icu_los_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    inpatient_mortality_n_missing = cohort_pl_t1['inpatient_mortality'].is_null().sum() if 'inpatient_mortality' in cohort_pl_t1.columns else t1_total_patients
+    inpatient_mortality_pct_missing = (inpatient_mortality_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    icu_mortality_n_missing = cohort_pl_t1['icu_mortality'].is_null().sum() if 'icu_mortality' in cohort_pl_t1.columns else t1_total_patients
+    icu_mortality_pct_missing = (icu_mortality_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    # ============================================================
+
+
     t1_total_pd = cohort_pl_t1.with_columns(
         ((pl.col('end_dttm') - pl.col('start_dttm')).dt.total_seconds() / 86400).alias('icu_los_days')
     )
@@ -1489,6 +1649,10 @@ def _(
     # Calculate demographics
     t1_mean_age = cohort_pl_t1['age_at_admission'].mean() if 'age_at_admission' in cohort_pl_t1.columns else None
     t1_sd_age = cohort_pl_t1['age_at_admission'].std() if 'age_at_admission' in cohort_pl_t1.columns else None
+
+    # BMI
+    t1_mean_bmi = cohort_pl_t1['bmi'].mean() if 'bmi' in cohort_pl_t1.columns else None
+    t1_sd_bmi = cohort_pl_t1['bmi'].std() if 'bmi' in cohort_pl_t1.columns else None
 
     # Sex
     t1_pct_female = None
@@ -1596,13 +1760,13 @@ def _(
     # ============================================================
 
     t1_table1_data = {
-        "site_id": "SITE_NAME_PLACEHOLDER",  # Sites should replace this
+        "site_id": site_name,
         "demographics": {
             "total_patients": int(t1_total_patients),
             "age_mean": float(t1_mean_age) if t1_mean_age is not None else "NOT_AVAILABLE",
             "age_sd": float(t1_sd_age) if t1_sd_age is not None else "NOT_AVAILABLE",
-            "bmi_mean": "NOT_AVAILABLE",
-            "bmi_sd": "NOT_AVAILABLE",
+            "bmi_mean": float(t1_mean_bmi) if t1_mean_bmi is not None else "NOT_AVAILABLE",
+            "bmi_sd": float(t1_sd_bmi) if t1_sd_bmi is not None else "NOT_AVAILABLE",
             "sex_female_n": int(t1_n_female) if t1_n_female is not None else "NOT_AVAILABLE",
             "sex_female_pct": float(t1_pct_female) if t1_pct_female is not None else "NOT_AVAILABLE",
             "race_ethnicity": t1_race_ethnicity_counts,
@@ -1655,6 +1819,80 @@ def _(
             "inpatient_mortality_pct": float(t1_inpatient_mortality_pct),
             "icu_mortality_n": int(t1_icu_mortality_n),
             "icu_mortality_pct": float(t1_icu_mortality_pct)
+        },
+        "missingness": {
+            "age_at_admission": {
+                "n_missing": int(age_n_missing),
+                "pct_missing": float(age_pct_missing)
+            },
+            "sex_category": {
+                "n_missing": int(sex_n_missing),
+                "pct_missing": float(sex_pct_missing)
+            },
+            "race_ethnicity": {
+                "n_missing": int(race_n_missing),
+                "pct_missing": float(race_pct_missing)
+            },
+            "bmi": {
+                "n_missing": int(bmi_n_missing),
+                "pct_missing": float(bmi_pct_missing)
+            },
+            "highest_temperature": {
+                "n_missing": int(highest_temp_n_missing),
+                "pct_missing": float(highest_temp_pct_missing)
+            },
+            "lowest_temperature": {
+                "n_missing": int(lowest_temp_n_missing),
+                "pct_missing": float(lowest_temp_pct_missing)
+            },
+            "lowest_map": {
+                "n_missing": int(lowest_map_n_missing),
+                "pct_missing": float(lowest_map_pct_missing)
+            },
+            "sofa_total": {
+                "n_missing": int(sofa_n_missing),
+                "pct_missing": float(sofa_pct_missing)
+            },
+            "vasopressor_ever": {
+                "n_missing": int(vasopressor_n_missing),
+                "pct_missing": float(vasopressor_pct_missing)
+            },
+            "NIPPV_ever": {
+                "n_missing": int(nippv_n_missing),
+                "pct_missing": float(nippv_pct_missing)
+            },
+            "HFNO_ever": {
+                "n_missing": int(hfno_n_missing),
+                "pct_missing": float(hfno_pct_missing)
+            },
+            "cvvh": {
+                "n_missing": int(cvvh_n_missing),
+                "pct_missing": float(cvvh_pct_missing)
+            },
+            "highest_wbc": {
+                "n_missing": int(wbc_n_missing),
+                "pct_missing": float(wbc_pct_missing)
+            },
+            "highest_creatinine": {
+                "n_missing": int(creatinine_n_missing),
+                "pct_missing": float(creatinine_pct_missing)
+            },
+            "hospital_los_days": {
+                "n_missing": int(hospital_los_n_missing),
+                "pct_missing": float(hospital_los_pct_missing)
+            },
+            "icu_los_days": {
+                "n_missing": int(icu_los_n_missing),
+                "pct_missing": float(icu_los_pct_missing)
+            },
+            "inpatient_mortality": {
+                "n_missing": int(inpatient_mortality_n_missing),
+                "pct_missing": float(inpatient_mortality_pct_missing)
+            },
+            "icu_mortality": {
+                "n_missing": int(icu_mortality_n_missing),
+                "pct_missing": float(icu_mortality_pct_missing)
+            }
         }
     }
 
@@ -1663,8 +1901,8 @@ def _(
     # ============================================================
 
     t1_json_path = Path('RESULTS_UPLOAD_ME') / 'table1_summary.json'
-    with open(t1_json_path, 'w') as f:
-        json.dump(t1_table1_data, f, indent=2)
+    with open(t1_json_path, 'w') as json_file:
+        json.dump(t1_table1_data, json_file, indent=2)
 
     print(f"\n✓ Saved JSON: {t1_json_path}")
 
@@ -1675,83 +1913,88 @@ def _(
     t1_table1_rows = []
 
     # Demographics section
-    t1_table1_rows.append({'Category': 'DEMOGRAPHICS', 'Variable': '', 'Value': '', 'Notes': ''})
-    t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'N (total patients)', 'Value': str(t1_total_patients), 'Notes': ''})
+    t1_table1_rows.append({'Category': 'DEMOGRAPHICS', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'N (total patients)', 'Value': str(t1_total_patients), 'n_missing': '', 'Notes': ''})
 
     if t1_mean_age is not None:
         t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Age (mean, SD)',
-                           'Value': f"{t1_mean_age:.1f} ± {t1_sd_age:.1f}", 'Notes': ''})
+                           'Value': f"{t1_mean_age:.1f} ± {t1_sd_age:.1f}", 'n_missing': str(age_n_missing), 'Notes': ''})
     else:
         t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Age (mean, SD)',
-                           'Value': 'NOT AVAILABLE', 'Notes': ''})
+                           'Value': 'NOT AVAILABLE', 'n_missing': str(age_n_missing), 'Notes': ''})
 
     if t1_n_female is not None:
         t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Sex, female (n, %)',
-                           'Value': f"{t1_n_female} ({t1_pct_female:.1f}%)", 'Notes': ''})
+                           'Value': f"{t1_n_female} ({t1_pct_female:.1f}%)", 'n_missing': str(sex_n_missing), 'Notes': ''})
 
     # BMI
-    t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'BMI (first value in hospitalization, mean SD)',
-                       'Value': 'NOT AVAILABLE', 'Notes': ''})
+    if t1_mean_bmi is not None:
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'BMI (first value in hospitalization, mean SD)',
+                           'Value': f"{t1_mean_bmi:.1f} ± {t1_sd_bmi:.1f}", 'n_missing': str(bmi_n_missing), 'Notes': ''})
+    else:
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'BMI (first value in hospitalization, mean SD)',
+                           'Value': 'NOT AVAILABLE', 'n_missing': str(bmi_n_missing), 'Notes': ''})
 
     # Race/Ethnicity
     if t1_race_ethnicity_counts:
-        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Race ethnicity, n %', 'Value': '', 'Notes': ''})
+        t1_table1_rows.append({'Category': 'Demographics', 'Variable': 'Race ethnicity, n %', 'Value': '', 'n_missing': str(race_n_missing), 'Notes': ''})
         for t1_race_cat in ['Hispanic', 'Non-Hispanic White', 'Non-Hispanic Black', 'Non-Hispanic Asian', 'Other', 'Not Reported']:
             if t1_race_cat in t1_race_ethnicity_counts:
                 t1_n = t1_race_ethnicity_counts[t1_race_cat]['n']
                 t1_pct = t1_race_ethnicity_counts[t1_race_cat]['pct']
                 t1_table1_rows.append({'Category': 'Demographics', 'Variable': f'  {t1_race_cat}',
-                                   'Value': f"{t1_n} ({t1_pct:.1f}%)", 'Notes': ''})
+                                   'Value': f"{t1_n} ({t1_pct:.1f}%)", 'n_missing': '', 'Notes': ''})
             else:
                 t1_table1_rows.append({'Category': 'Demographics', 'Variable': f'  {t1_race_cat}',
-                                   'Value': '0 (0.0%)', 'Notes': ''})
+                                   'Value': '0 (0.0%)', 'n_missing': '', 'Notes': ''})
 
     # Clinical characteristics section
-    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'Notes': ''})
-    t1_table1_rows.append({'Category': 'CLINICAL CHARACTERISTICS', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'CLINICAL CHARACTERISTICS', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Highest temperature (mean, SD)',
-                       'Value': f"{t1_mean_highest_temp:.1f} ± {t1_sd_highest_temp:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_highest_temp:.1f} ± {t1_sd_highest_temp:.1f}", 'n_missing': str(highest_temp_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Lowest temperature (mean, SD)',
-                       'Value': f"{t1_mean_lowest_temp:.1f} ± {t1_sd_lowest_temp:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_lowest_temp:.1f} ± {t1_sd_lowest_temp:.1f}", 'n_missing': str(lowest_temp_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Lowest mean arterial pressure (mean, SD)',
-                       'Value': f"{t1_mean_lowest_map:.1f} ± {t1_sd_lowest_map:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_lowest_map:.1f} ± {t1_sd_lowest_map:.1f}", 'n_missing': str(lowest_map_n_missing), 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Severity', 'Variable': 'Highest ICU SOFA score (mean, SD)',
-                       'Value': f"{t1_mean_highest_sofa:.1f} ± {t1_sd_highest_sofa:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_highest_sofa:.1f} ± {t1_sd_highest_sofa:.1f}", 'n_missing': str(sofa_n_missing), 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'Vasopressor_ever (n, %)',
-                       'Value': f"{t1_vasopressor_ever_n} ({t1_vasopressor_ever_pct:.1f}%)", 'Notes': ''})
+                       'Value': f"{t1_vasopressor_ever_n} ({t1_vasopressor_ever_pct:.1f}%)", 'n_missing': str(vasopressor_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'NIPPV_ever (n, %)',
-                       'Value': f"{t1_nippv_ever_n} ({t1_nippv_ever_pct:.1f}%)", 'Notes': ''})
+                       'Value': f"{t1_nippv_ever_n} ({t1_nippv_ever_pct:.1f}%)", 'n_missing': str(nippv_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'HFNO_ever (n, %)',
-                       'Value': f"{t1_hfno_ever_n} ({t1_hfno_ever_pct:.1f}%)", 'Notes': ''})
+                       'Value': f"{t1_hfno_ever_n} ({t1_hfno_ever_pct:.1f}%)", 'n_missing': str(hfno_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'CVVH (non missing and > 0 blood_flow) (n, %)',
-                       'Value': 'NOT AVAILABLE', 'Notes': ''})
+                       'Value': 'NOT AVAILABLE', 'n_missing': str(cvvh_n_missing), 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Labs', 'Variable': 'Highest WBC (mean, sd)',
-                       'Value': f"{t1_mean_highest_wbc:.1f} ± {t1_sd_highest_wbc:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_highest_wbc:.1f} ± {t1_sd_highest_wbc:.1f}", 'n_missing': str(wbc_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Labs', 'Variable': 'Highest_Cr (mean, sd)',
-                       'Value': f"{t1_mean_highest_cr:.2f} ± {t1_sd_highest_cr:.2f}", 'Notes': ''})
+                       'Value': f"{t1_mean_highest_cr:.2f} ± {t1_sd_highest_cr:.2f}", 'n_missing': str(creatinine_n_missing), 'Notes': ''})
 
     # Antibiotic metrics section
-    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'Notes': ''})
-    t1_table1_rows.append({'Category': 'ANTIBIOTIC METRICS', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'ANTIBIOTIC METRICS', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Antibiotics', 'Variable': 'Common antibiotics prescribed (DOT per 1000 PD)',
-                       'Value': '', 'Notes': 'Top 15'})
+                       'Value': '', 'n_missing': '', 'Notes': 'Top 15'})
 
     for t1_row in t1_top_antibiotics.iter_rows(named=True):
         t1_table1_rows.append({'Category': 'Antibiotics',
                            'Variable': f"  {t1_row['antibiotic']}",
                            'Value': f"{t1_row['dot_per_1000_pd']:.2f}",
+                           'n_missing': '',
                            'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Antibiotics', 'Variable': 'DOT per 1000 patient days (all antibiotics in excel)',
-                       'Value': f"{t1_overall_dot_per_1000_pd:.2f}", 'Notes': ''})
+                       'Value': f"{t1_overall_dot_per_1000_pd:.2f}", 'n_missing': '', 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'ASC Scores', 'Variable': 'Antibiotic Spectrum Scores (mean, SD per day)',
-                       'Value': '', 'Notes': ''})
+                       'Value': '', 'n_missing': '', 'Notes': ''})
 
     for t1_day in range(11):  # Days 0-10
         t1_mean_key = f'day_{t1_day}_mean'
@@ -1760,29 +2003,30 @@ def _(
             t1_table1_rows.append({'Category': 'ASC Scores',
                                'Variable': f"  Day {t1_day} ASC score",
                                'Value': f"{t1_daily_asc_dict[t1_mean_key]:.2f} ± {t1_daily_asc_dict[t1_sd_key]:.2f}",
+                               'n_missing': '',
                                'Notes': ''})
 
     t1_table1_rows.append({'Category': 'ASC Scores', 'Variable': 'DASC (days of ASC) per 1000 PD',
-                       'Value': f"{t1_dasc_per_1000_pd:.2f}", 'Notes': ''})
+                       'Value': f"{t1_dasc_per_1000_pd:.2f}", 'n_missing': '', 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'AFD', 'Variable': 'Antibiotic-Free Days (mean % of ICU days)',
-                       'Value': f"{t1_afd_mean_pct:.1f}%", 'Notes': ''})
+                       'Value': f"{t1_afd_mean_pct:.1f}%", 'n_missing': '', 'Notes': ''})
     t1_table1_rows.append({'Category': 'AFD', 'Variable': 'AFD rate (mean ± SD)',
-                       'Value': f"{t1_afd_mean_rate:.3f} ± {t1_afd_sd_rate:.3f}", 'Notes': ''})
+                       'Value': f"{t1_afd_mean_rate:.3f} ± {t1_afd_sd_rate:.3f}", 'n_missing': '', 'Notes': ''})
 
     # Outcomes section
-    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'Notes': ''})
-    t1_table1_rows.append({'Category': 'OUTCOMES', 'Variable': '', 'Value': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': '', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
+    t1_table1_rows.append({'Category': 'OUTCOMES', 'Variable': '', 'Value': '', 'n_missing': '', 'Notes': ''})
     t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'Total patient-days',
-                       'Value': f"{int(t1_total_patient_days):,}", 'Notes': ''})
+                       'Value': f"{int(t1_total_patient_days):,}", 'n_missing': '', 'Notes': ''})
     t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'Hospital LOS (mean, SD) days',
-                       'Value': f"{t1_mean_hospital_los:.1f} ± {t1_sd_hospital_los:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_hospital_los:.1f} ± {t1_sd_hospital_los:.1f}", 'n_missing': str(hospital_los_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'ICU LOS of index (mean, SD) days',
-                       'Value': f"{t1_mean_icu_los:.1f} ± {t1_sd_icu_los:.1f}", 'Notes': ''})
+                       'Value': f"{t1_mean_icu_los:.1f} ± {t1_sd_icu_los:.1f}", 'n_missing': str(icu_los_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'Inpatient mortality (n, %)',
-                       'Value': f"{t1_inpatient_mortality_n} ({t1_inpatient_mortality_pct:.1f}%)", 'Notes': ''})
+                       'Value': f"{t1_inpatient_mortality_n} ({t1_inpatient_mortality_pct:.1f}%)", 'n_missing': str(inpatient_mortality_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Outcomes', 'Variable': 'ICU mortality (n, %)',
-                       'Value': f"{t1_icu_mortality_n} ({t1_icu_mortality_pct:.1f}%)", 'Notes': ''})
+                       'Value': f"{t1_icu_mortality_n} ({t1_icu_mortality_pct:.1f}%)", 'n_missing': str(icu_mortality_n_missing), 'Notes': ''})
 
     # Convert to DataFrame and save
     t1_table1_df = pl.DataFrame(t1_table1_rows)

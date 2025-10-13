@@ -779,7 +779,8 @@ def _(cohort_df, pd, resp_df):
     # Group by hospitalization_id and check if devices were used
     resp_summary = resp_icu_window.groupby('hospitalization_id').agg(
         NIPPV_ever=('device_category_lower', lambda x: 1 if any('nippv' in str(d) for d in x) else 0),
-        HFNO_ever=('device_category_lower', lambda x: 1 if any('high flow nc' in str(d) for d in x) else 0)
+        HFNO_ever=('device_category_lower', lambda x: 1 if any('high flow nc' in str(d) for d in x) else 0),
+        IMV_ever=('device_category_lower', lambda x: 1 if any('imv' in str(d) for d in x) else 0)
     ).reset_index()
 
     print(f"✓ Respiratory support metrics calculated for {len(resp_summary):,} hospitalizations")
@@ -791,6 +792,10 @@ def _(cohort_df, pd, resp_df):
     print(f"\nHFNO usage:")
     print(f"  Hospitalizations with HFNO: {(resp_summary['HFNO_ever'] == 1).sum():,} ({(resp_summary['HFNO_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without HFNO: {(resp_summary['HFNO_ever'] == 0).sum():,} ({(resp_summary['HFNO_ever'] == 0).mean()*100:.1f}%)")
+
+    print(f"\nIMV usage:")
+    print(f"  Hospitalizations with IMV: {(resp_summary['IMV_ever'] == 1).sum():,} ({(resp_summary['IMV_ever'] == 1).mean()*100:.1f}%)")
+    print(f"  Hospitalizations without IMV: {(resp_summary['IMV_ever'] == 0).sum():,} ({(resp_summary['IMV_ever'] == 0).mean()*100:.1f}%)")
     return (resp_summary,)
 
 
@@ -806,15 +811,18 @@ def _(cohort_complete, pd, resp_summary):
         how='left'
     )
 
-    # Fill NaN (no NIPPV/HFNO) with 0
+    # Fill NaN (no NIPPV/HFNO/IMV) with 0
     cohort_with_resp['NIPPV_ever'] = cohort_with_resp['NIPPV_ever'].fillna(0).astype(int)
     cohort_with_resp['HFNO_ever'] = cohort_with_resp['HFNO_ever'].fillna(0).astype(int)
+    cohort_with_resp['IMV_ever'] = cohort_with_resp['IMV_ever'].fillna(0).astype(int)
 
     print(f"✓ Respiratory support metrics merged to cohort: {len(cohort_with_resp):,} hospitalizations")
     print(f"  Hospitalizations with NIPPV: {(cohort_with_resp['NIPPV_ever'] == 1).sum():,} ({(cohort_with_resp['NIPPV_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without NIPPV: {(cohort_with_resp['NIPPV_ever'] == 0).sum():,} ({(cohort_with_resp['NIPPV_ever'] == 0).mean()*100:.1f}%)")
     print(f"  Hospitalizations with HFNO: {(cohort_with_resp['HFNO_ever'] == 1).sum():,} ({(cohort_with_resp['HFNO_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without HFNO: {(cohort_with_resp['HFNO_ever'] == 0).sum():,} ({(cohort_with_resp['HFNO_ever'] == 0).mean()*100:.1f}%)")
+    print(f"  Hospitalizations with IMV: {(cohort_with_resp['IMV_ever'] == 1).sum():,} ({(cohort_with_resp['IMV_ever'] == 1).mean()*100:.1f}%)")
+    print(f"  Hospitalizations without IMV: {(cohort_with_resp['IMV_ever'] == 0).sum():,} ({(cohort_with_resp['IMV_ever'] == 0).mean()*100:.1f}%)")
 
     # Reorder columns with respiratory support columns included
     final_column_order_with_resp = [
@@ -835,6 +843,7 @@ def _(cohort_complete, pd, resp_summary):
         'highest_creatinine',
         'NIPPV_ever',
         'HFNO_ever',
+        'IMV_ever',
         'vasopressor_ever',
         'no_of_vasopressor',
         'location_type',
@@ -870,16 +879,25 @@ def _(ClifOrchestrator):
 
 @app.cell
 def _(cohort_final_with_resp, pd):
-    # Prepare cohort for SOFA computation
-    print("Preparing cohort for SOFA score computation...")
+    # Prepare cohort for SOFA computation (first 24 hours of ICU stay only)
+    print("Preparing cohort for SOFA score computation (first 24 hours)...")
+
+    # Calculate end_time as start + 24 hours, but cap at actual ICU discharge
+    sofa_end_time = pd.Series([
+        min(start + pd.Timedelta(hours=24), end)
+        for start, end in zip(
+            cohort_final_with_resp['start_dttm'],
+            cohort_final_with_resp['end_dttm']
+        )
+    ])
 
     sofa_cohort_df = pd.DataFrame({
         'hospitalization_id': cohort_final_with_resp['hospitalization_id'],
         'start_time': cohort_final_with_resp['start_dttm'],
-        'end_time': cohort_final_with_resp['end_dttm']
+        'end_time': sofa_end_time
     })
 
-    print(f"✓ SOFA cohort prepared: {len(sofa_cohort_df):,} hospitalizations")
+    print(f"✓ SOFA cohort prepared: {len(sofa_cohort_df):,} hospitalizations (first 24h window)")
     return (sofa_cohort_df,)
 
 
@@ -908,7 +926,7 @@ def _(co_sofa, sofa_cohort_ids):
         },
         'vitals': {
             'columns': ['hospitalization_id', 'recorded_dttm', 'vital_category', 'vital_value'],
-            'categories': ['map', 'spo2','weight_kg']
+            'categories': ['map', 'spo2', 'weight_kg', 'height_cm']
         },
         'patient_assessments': {
             'columns': ['hospitalization_id', 'recorded_dttm', 'assessment_category', 'numerical_value'],
@@ -1021,11 +1039,62 @@ def _(co_sofa, sofa_cohort_df):
 
 
 @app.cell
-def _(cohort_final_with_resp, pd, sofa_scores):
-    # Merge SOFA scores with cohort
+def _(co_sofa, pd):
+    # Extract height and weight from vitals and calculate BMI
+    print("\n=== BMI Calculation ===")
+    print("Extracting height and weight from vitals...")
+
+    # Get vitals dataframe from co_sofa
+    vitals_for_bmi = co_sofa.vitals.df.copy()
+
+    # Filter for height_cm and weight_kg only
+    bmi_vitals = vitals_for_bmi[
+        vitals_for_bmi['vital_category'].isin(['height_cm', 'weight_kg'])
+    ].copy()
+
+    print(f"  Vitals for BMI: {len(bmi_vitals):,} records")
+
+    # Get first recorded height and weight for each hospitalization
+    # Sort by recorded_dttm to get earliest values
+    bmi_vitals = bmi_vitals.sort_values('recorded_dttm')
+
+    # Pivot to get height_cm and weight_kg as separate columns (take first value)
+    bmi_pivot = bmi_vitals.groupby(['hospitalization_id', 'vital_category'])['vital_value'].first().unstack()
+
+    # Calculate BMI: weight_kg / (height_cm/100)^2
+    # If either height or weight is missing, BMI will be null
+    bmi_df = pd.DataFrame({
+        'hospitalization_id': bmi_pivot.index,
+        'height_cm': bmi_pivot.get('height_cm', pd.Series(dtype=float)),
+        'weight_kg': bmi_pivot.get('weight_kg', pd.Series(dtype=float))
+    }).reset_index(drop=True)
+
+    # Calculate BMI (null if either height or weight is missing)
+    bmi_df['bmi'] = bmi_df.apply(
+        lambda row: row['weight_kg'] / ((row['height_cm'] / 100) ** 2)
+        if pd.notna(row['height_cm']) and pd.notna(row['weight_kg']) and row['height_cm'] > 0
+        else None,
+        axis=1
+    )
+
+    # Keep only hospitalization_id and bmi for merging
+    bmi_final = bmi_df[['hospitalization_id', 'bmi']].copy()
+
+    print(f"✓ BMI calculated for {bmi_final['bmi'].notna().sum():,} hospitalizations")
+    print(f"  Missing BMI: {bmi_final['bmi'].isna().sum():,}")
+    if bmi_final['bmi'].notna().any():
+        print(f"  Mean BMI: {bmi_final['bmi'].mean():.2f}")
+        print(f"  Median BMI: {bmi_final['bmi'].median():.2f}")
+
+    return (bmi_final,)
+
+
+@app.cell
+def _(bmi_final, cohort_final_with_resp, pd, sofa_scores):
+    # Merge SOFA scores and BMI with cohort
     print("Merging SOFA scores with cohort...")
 
-    cohort_with_sofa = pd.merge(
+    cohort_with_sofa_temp = pd.merge(
         cohort_final_with_resp,
         sofa_scores,
         on='hospitalization_id',
@@ -1033,9 +1102,23 @@ def _(cohort_final_with_resp, pd, sofa_scores):
     )
 
     # Print SOFA merge summary (inline to avoid variable conflicts)
-    print(f"✓ SOFA scores merged: {cohort_with_sofa.shape}")
-    print(f"  Total columns: {len(cohort_with_sofa.columns)}")
-    print(f"  SOFA columns added: {len([col for col in cohort_with_sofa.columns if 'sofa' in col.lower()])}")
+    print(f"✓ SOFA scores merged: {cohort_with_sofa_temp.shape}")
+    print(f"  Total columns: {len(cohort_with_sofa_temp.columns)}")
+    print(f"  SOFA columns added: {len([col for col in cohort_with_sofa_temp.columns if 'sofa' in col.lower()])}")
+
+    # Merge BMI
+    print("Merging BMI with cohort...")
+    cohort_with_sofa = pd.merge(
+        cohort_with_sofa_temp,
+        bmi_final,
+        on='hospitalization_id',
+        how='left'
+    )
+
+    print(f"✓ BMI merged to cohort: {len(cohort_with_sofa):,} hospitalizations")
+    print(f"  BMI available: {cohort_with_sofa['bmi'].notna().sum():,} ({cohort_with_sofa['bmi'].notna().mean()*100:.1f}%)")
+    print(f"  BMI missing: {cohort_with_sofa['bmi'].isna().sum():,} ({cohort_with_sofa['bmi'].isna().mean()*100:.1f}%)")
+
     return (cohort_with_sofa,)
 
 
@@ -1081,6 +1164,17 @@ def _(cohort_with_sofa):
     print(f"Deaths during ICU stay: {cohort_with_sofa['icu_mortality'].sum():,} ({cohort_with_sofa['icu_mortality'].mean()*100:.2f}%)")
     print(f"Survived ICU stay: {(cohort_with_sofa['icu_mortality'] == 0).sum():,}")
 
+    print(f"\n=== BMI (Body Mass Index) ===")
+    if 'bmi' in cohort_with_sofa.columns:
+        print(f"Mean BMI: {cohort_with_sofa['bmi'].mean():.2f}")
+        print(f"Median BMI: {cohort_with_sofa['bmi'].median():.2f}")
+        print(f"Std: {cohort_with_sofa['bmi'].std():.2f}")
+        print(f"Min: {cohort_with_sofa['bmi'].min():.2f}")
+        print(f"Max: {cohort_with_sofa['bmi'].max():.2f}")
+        print(f"25th percentile: {cohort_with_sofa['bmi'].quantile(0.25):.2f}")
+        print(f"75th percentile: {cohort_with_sofa['bmi'].quantile(0.75):.2f}")
+        print(f"Missing: {cohort_with_sofa['bmi'].isna().sum():,} ({cohort_with_sofa['bmi'].isna().mean()*100:.1f}%)")
+
     print(f"\n=== Vital Signs (ICU Stay Window) ===")
     if 'highest_temperature' in cohort_with_sofa.columns:
         print(f"Highest Temperature (°C):")
@@ -1121,6 +1215,10 @@ def _(cohort_with_sofa):
     if 'HFNO_ever' in cohort_with_sofa.columns:
         print(f"\nHospitalizations with HFNO: {(cohort_with_sofa['HFNO_ever'] == 1).sum():,} ({(cohort_with_sofa['HFNO_ever'] == 1).mean()*100:.1f}%)")
         print(f"Hospitalizations without HFNO: {(cohort_with_sofa['HFNO_ever'] == 0).sum():,} ({(cohort_with_sofa['HFNO_ever'] == 0).mean()*100:.1f}%)")
+
+    if 'IMV_ever' in cohort_with_sofa.columns:
+        print(f"\nHospitalizations with IMV: {(cohort_with_sofa['IMV_ever'] == 1).sum():,} ({(cohort_with_sofa['IMV_ever'] == 1).mean()*100:.1f}%)")
+        print(f"Hospitalizations without IMV: {(cohort_with_sofa['IMV_ever'] == 0).sum():,} ({(cohort_with_sofa['IMV_ever'] == 0).mean()*100:.1f}%)")
 
     print(f"\n=== Vasopressor Usage (ICU Stay Window) ===")
     if 'vasopressor_ever' in cohort_with_sofa.columns:
