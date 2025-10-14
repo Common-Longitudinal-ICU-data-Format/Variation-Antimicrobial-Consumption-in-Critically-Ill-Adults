@@ -1231,6 +1231,111 @@ def _(daily_asc_patient_level, pl, windows_pl):
     return (asc_by_year_summary,)
 
 
+@app.cell
+def _(cohort_df, daily_asc_patient_level, pl, windows_pl):
+    # SUB-ANALYSIS: Calculate ASC by Year stratified by Location Type
+    print("\n=== SUB-ANALYSIS: ASC by Year × Location Type ===")
+    print("Calculating location-type-stratified ASC trends by year...")
+
+    # Join daily_asc with cohort to get location_type
+    print("\nJoining daily ASC data with cohort to get location_type...")
+    asc_with_location = (
+        daily_asc_patient_level
+        .join(
+            pl.DataFrame(cohort_df[['hospitalization_id', 'location_type']]),
+            on='hospitalization_id',
+            how='left'
+        )
+    )
+
+    # Join with windows to get timestamps
+    asc_location_with_timestamps = (
+        asc_with_location
+        .join(
+            windows_pl.select(['hospitalization_id', 'window_num', 'window_start']),
+            on=['hospitalization_id', 'window_num'],
+            how='left'
+        )
+    )
+
+    # Extract year
+    asc_location_with_year = asc_location_with_timestamps.with_columns(
+        pl.col('window_start').dt.year().alias('year')
+    )
+
+    # Group by year AND location_type
+    print("\nCalculating summary statistics by year AND location_type...")
+    asc_by_year_location = (
+        asc_location_with_year
+        .group_by(['year', 'location_type'])
+        .agg([
+            pl.col('daily_asc').mean().alias('mean_asc'),
+            pl.col('daily_asc').std().alias('sd_asc'),
+            pl.col('daily_asc').median().alias('median_asc'),
+            pl.col('window_num').count().alias('n_windows'),
+            pl.col('hospitalization_id').n_unique().alias('n_hospitalizations')
+        ])
+        .with_columns([
+            (pl.col('sd_asc') / pl.col('n_windows').sqrt()).alias('se_asc'),
+            (pl.col('mean_asc') - 1.96 * (pl.col('sd_asc') / pl.col('n_windows').sqrt())).alias('lower_ci_asc'),
+            (pl.col('mean_asc') + 1.96 * (pl.col('sd_asc') / pl.col('n_windows').sqrt())).alias('upper_ci_asc')
+        ])
+        .sort(['location_type', 'year'])
+    )
+
+    print(f"\n✓ ASC by Year × Location Type calculated")
+    print(f"  Location types: {asc_by_year_location['location_type'].n_unique()}")
+    print(f"  Year range: {asc_by_year_location['year'].min()} - {asc_by_year_location['year'].max()}")
+    print(f"\n=== ASC by Year × Location Type Summary ===")
+    print(asc_by_year_location.to_pandas().to_string(index=False))
+    return (asc_by_year_location,)
+
+
+@app.cell
+def _(cohort_df, daily_asc_patient_level, pl):
+    # SUB-ANALYSIS: Calculate ASC by ICU Day (Window) stratified by Location Type
+    print("\n=== SUB-ANALYSIS: ASC by ICU Day × Location Type ===")
+    print("Calculating location-type-stratified ASC trends by ICU day...")
+
+    # Join daily_asc with cohort to get location_type
+    print("\nJoining daily ASC data with cohort to get location_type...")
+    asc_window_with_location = (
+        daily_asc_patient_level
+        .join(
+            pl.DataFrame(cohort_df[['hospitalization_id', 'location_type']]),
+            on='hospitalization_id',
+            how='left'
+        )
+        .filter(pl.col('window_num') <= 10)  # Filter to windows 0-10
+    )
+
+    # Group by window_num AND location_type
+    print("\nCalculating summary statistics by window AND location_type...")
+    asc_by_window_location = (
+        asc_window_with_location
+        .group_by(['window_num', 'location_type'])
+        .agg([
+            pl.col('daily_asc').mean().alias('mean_asc'),
+            pl.col('daily_asc').std().alias('sd_asc'),
+            pl.col('daily_asc').median().alias('median_asc'),
+            pl.col('hospitalization_id').count().alias('n_hospitalizations')
+        ])
+        .with_columns([
+            (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt()).alias('se_asc'),
+            (pl.col('mean_asc') - 1.96 * (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt())).alias('lower_ci_asc'),
+            (pl.col('mean_asc') + 1.96 * (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt())).alias('upper_ci_asc')
+        ])
+        .sort(['location_type', 'window_num'])
+    )
+
+    print(f"\n✓ ASC by ICU Day × Location Type calculated")
+    print(f"  Location types: {asc_by_window_location['location_type'].n_unique()}")
+    print(f"  ICU days: 0-{asc_by_window_location['window_num'].max()}")
+    print(f"\n=== ASC by Window × Location Type Summary ===")
+    print(asc_by_window_location.to_pandas().to_string(index=False))
+    return (asc_by_window_location,)
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Save Results""")
@@ -1547,6 +1652,184 @@ def _(Path, daily_asc_summary, np, plt, scipy):
 
 @app.cell(hide_code=True)
 def _(mo):
+    mo.md(r"""## SUB-ANALYSIS: Location-Type Stratified Visualizations""")
+    return
+
+
+@app.cell
+def _(Path, asc_by_year_location, np, plt, scipy):
+    # Plot 3: ASC Trend by Year (Location-Type Stratified)
+    print("\n=== CREATING SUB-ANALYSIS PLOT 3: ASC by Year × Location Type ===")
+    print("Creating multi-line plot with all location types...")
+
+    # Convert to pandas for easier plotting
+    df_year_loc = asc_by_year_location.to_pandas()
+
+    # Get unique location types
+    location_types_yr = df_year_loc['location_type'].unique()
+    print(f"Location types to plot: {len(location_types_yr)}")
+
+    # Define color palette (use distinct colors for each location type)
+    color_palette_yr = ['#2E86AB', '#A23B72', '#F18F01', '#06A77D', '#C73E1D',
+                        '#6A4C93', '#1B998B', '#E63946', '#457B9D', '#F4A261']
+    colors_yr = {loc: color_palette_yr[i % len(color_palette_yr)]
+                 for i, loc in enumerate(location_types_yr)}
+
+    # Create figure
+    fig_year_loc, ax_year_loc = plt.subplots(figsize=(12, 7))
+
+    # Plot each location type
+    for loc_type_yr in location_types_yr:
+        df_loc_yr = df_year_loc[df_year_loc['location_type'] == loc_type_yr].sort_values('year')
+
+        if len(df_loc_yr) == 0:
+            continue
+
+        years_yr = df_loc_yr['year'].values
+        mean_asc_yr = df_loc_yr['mean_asc'].values
+        lower_ci_yr = df_loc_yr['lower_ci_asc'].values
+        upper_ci_yr = df_loc_yr['upper_ci_asc'].values
+
+        color_yr = colors_yr[loc_type_yr]
+
+        # Create spline interpolation if enough points
+        if len(years_yr) >= 4:
+            years_smooth_yr = np.linspace(years_yr.min(), years_yr.max(), 300)
+            spline_yr = scipy.interpolate.make_interp_spline(years_yr, mean_asc_yr, k=min(3, len(years_yr)-1))
+            mean_smooth_yr = spline_yr(years_smooth_yr)
+
+            spline_lower_yr = scipy.interpolate.make_interp_spline(years_yr, lower_ci_yr, k=min(3, len(years_yr)-1))
+            lower_smooth_yr = spline_lower_yr(years_smooth_yr)
+
+            spline_upper_yr = scipy.interpolate.make_interp_spline(years_yr, upper_ci_yr, k=min(3, len(years_yr)-1))
+            upper_smooth_yr = spline_upper_yr(years_smooth_yr)
+        else:
+            years_smooth_yr = years_yr
+            mean_smooth_yr = mean_asc_yr
+            lower_smooth_yr = lower_ci_yr
+            upper_smooth_yr = upper_ci_yr
+
+        # Plot mean line
+        ax_year_loc.plot(years_smooth_yr, mean_smooth_yr, color=color_yr, linewidth=2.5, label=loc_type_yr)
+
+        # Plot error band (95% CI)
+        ax_year_loc.fill_between(years_smooth_yr, lower_smooth_yr, upper_smooth_yr,
+                                  alpha=0.2, color=color_yr)
+
+        # Plot original data points
+        ax_year_loc.scatter(years_yr, mean_asc_yr, color=color_yr, s=60, zorder=5, alpha=0.7)
+
+    # Styling
+    ax_year_loc.set_xlabel('Year', fontsize=12, fontweight='bold')
+    ax_year_loc.set_ylabel('Mean Antibiotic Spectrum Coverage (ASC)', fontsize=12, fontweight='bold')
+    ax_year_loc.set_title('ASC Trend by Year Stratified by ICU Location Type\n(Sub-Analysis)',
+                          fontsize=14, fontweight='bold', pad=20)
+    ax_year_loc.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    ax_year_loc.legend(loc='best', frameon=True, shadow=True, fontsize=9, ncol=2)
+
+    # Format x-axis
+    all_years_yr = sorted(df_year_loc['year'].unique())
+    ax_year_loc.set_xticks(all_years_yr)
+    ax_year_loc.set_xticklabels([int(y) for y in all_years_yr])
+
+    plt.tight_layout()
+
+    # Save
+    plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_by_location_type.png', dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_by_location_type.png")
+
+    plt.close()
+    return
+
+
+@app.cell
+def _(Path, asc_by_window_location, np, plt, scipy):
+    # Plot 4: ASC Trend by ICU Day (Location-Type Stratified)
+    print("\n=== CREATING SUB-ANALYSIS PLOT 4: ASC by ICU Day × Location Type ===")
+    print("Creating multi-line plot with all location types...")
+
+    # Convert to pandas for easier plotting
+    df_window_loc = asc_by_window_location.to_pandas()
+
+    # Get unique location types
+    location_types_day = df_window_loc['location_type'].unique()
+    print(f"Location types to plot: {len(location_types_day)}")
+
+    # Define color palette (same as Plot 3 for consistency)
+    color_palette_day = ['#2E86AB', '#A23B72', '#F18F01', '#06A77D', '#C73E1D',
+                         '#6A4C93', '#1B998B', '#E63946', '#457B9D', '#F4A261']
+    colors_day = {loc: color_palette_day[i % len(color_palette_day)]
+                  for i, loc in enumerate(location_types_day)}
+
+    # Create figure
+    fig_day_loc, ax_day_loc = plt.subplots(figsize=(12, 7))
+
+    # Plot each location type
+    for loc_type_day in location_types_day:
+        df_loc_day = df_window_loc[df_window_loc['location_type'] == loc_type_day].sort_values('window_num')
+
+        if len(df_loc_day) == 0:
+            continue
+
+        windows_day = df_loc_day['window_num'].values
+        mean_asc_day = df_loc_day['mean_asc'].values
+        lower_ci_day = df_loc_day['lower_ci_asc'].values
+        upper_ci_day = df_loc_day['upper_ci_asc'].values
+
+        color_day = colors_day[loc_type_day]
+
+        # Create spline interpolation if enough points
+        if len(windows_day) >= 4:
+            windows_smooth_day = np.linspace(windows_day.min(), windows_day.max(), 300)
+            spline_day = scipy.interpolate.make_interp_spline(windows_day, mean_asc_day, k=min(3, len(windows_day)-1))
+            mean_smooth_day = spline_day(windows_smooth_day)
+
+            spline_lower_day = scipy.interpolate.make_interp_spline(windows_day, lower_ci_day, k=min(3, len(windows_day)-1))
+            lower_smooth_day = spline_lower_day(windows_smooth_day)
+
+            spline_upper_day = scipy.interpolate.make_interp_spline(windows_day, upper_ci_day, k=min(3, len(windows_day)-1))
+            upper_smooth_day = spline_upper_day(windows_smooth_day)
+        else:
+            windows_smooth_day = windows_day
+            mean_smooth_day = mean_asc_day
+            lower_smooth_day = lower_ci_day
+            upper_smooth_day = upper_ci_day
+
+        # Plot mean line
+        ax_day_loc.plot(windows_smooth_day, mean_smooth_day, color=color_day, linewidth=2.5, label=loc_type_day)
+
+        # Plot error band (95% CI)
+        ax_day_loc.fill_between(windows_smooth_day, lower_smooth_day, upper_smooth_day,
+                                alpha=0.2, color=color_day)
+
+        # Plot original data points
+        ax_day_loc.scatter(windows_day, mean_asc_day, color=color_day, s=60, zorder=5, alpha=0.7)
+
+    # Styling
+    ax_day_loc.set_xlabel('ICU Day', fontsize=12, fontweight='bold')
+    ax_day_loc.set_ylabel('Mean Antibiotic Spectrum Coverage (ASC)', fontsize=12, fontweight='bold')
+    ax_day_loc.set_title('ASC Trend by ICU Day Stratified by ICU Location Type\n(Sub-Analysis)',
+                         fontsize=14, fontweight='bold', pad=20)
+    ax_day_loc.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    ax_day_loc.legend(loc='best', frameon=True, shadow=True, fontsize=9, ncol=2)
+
+    # Format x-axis
+    all_windows_day = sorted(df_window_loc['window_num'].unique())
+    ax_day_loc.set_xticks(all_windows_day)
+    ax_day_loc.set_xticklabels([int(w) for w in all_windows_day])
+
+    plt.tight_layout()
+
+    # Save
+    plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_window_by_location_type.png', dpi=300, bbox_inches='tight')
+    print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_window_by_location_type.png")
+
+    plt.close()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
     mo.md(r"""## Generate Table 1: Summary Statistics for Multi-Site Comparison""")
     return
 
@@ -1615,6 +1898,9 @@ def _(
 
     hfno_n_missing = cohort_pl_t1['HFNO_ever'].is_null().sum() if 'HFNO_ever' in cohort_pl_t1.columns else t1_total_patients
     hfno_pct_missing = (hfno_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    imv_n_missing = cohort_pl_t1['IMV_ever'].is_null().sum() if 'IMV_ever' in cohort_pl_t1.columns else t1_total_patients
+    imv_pct_missing = (imv_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
 
     cvvh_n_missing = t1_total_patients  # Not available yet
     cvvh_pct_missing = 100.0
@@ -1701,6 +1987,9 @@ def _(
 
     t1_hfno_ever_n = cohort_pl_t1['HFNO_ever'].sum()
     t1_hfno_ever_pct = (t1_hfno_ever_n / t1_total_patients * 100)
+
+    t1_imv_ever_n = cohort_pl_t1['IMV_ever'].sum()
+    t1_imv_ever_pct = (t1_imv_ever_n / t1_total_patients * 100)
 
     # Labs
     t1_mean_highest_wbc = cohort_pl_t1['highest_wbc'].mean()
@@ -1865,6 +2154,10 @@ def _(
                 "n_missing": int(hfno_n_missing),
                 "pct_missing": float(hfno_pct_missing)
             },
+            "IMV_ever": {
+                "n_missing": int(imv_n_missing),
+                "pct_missing": float(imv_pct_missing)
+            },
             "cvvh": {
                 "n_missing": int(cvvh_n_missing),
                 "pct_missing": float(cvvh_pct_missing)
@@ -1959,7 +2252,7 @@ def _(
     t1_table1_rows.append({'Category': 'Vitals', 'Variable': 'Lowest mean arterial pressure (mean, SD)',
                        'Value': f"{t1_mean_lowest_map:.1f} ± {t1_sd_lowest_map:.1f}", 'n_missing': str(lowest_map_n_missing), 'Notes': ''})
 
-    t1_table1_rows.append({'Category': 'Severity', 'Variable': 'Highest ICU SOFA score (mean, SD)',
+    t1_table1_rows.append({'Category': 'Severity', 'Variable': 'Highest SOFA score in 1st 24 hours (mean, SD)',
                        'Value': f"{t1_mean_highest_sofa:.1f} ± {t1_sd_highest_sofa:.1f}", 'n_missing': str(sofa_n_missing), 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'Vasopressor_ever (n, %)',
@@ -1968,6 +2261,8 @@ def _(
                        'Value': f"{t1_nippv_ever_n} ({t1_nippv_ever_pct:.1f}%)", 'n_missing': str(nippv_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'HFNO_ever (n, %)',
                        'Value': f"{t1_hfno_ever_n} ({t1_hfno_ever_pct:.1f}%)", 'n_missing': str(hfno_n_missing), 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'IMV_ever (n, %)',
+                       'Value': f"{t1_imv_ever_n} ({t1_imv_ever_pct:.1f}%)", 'n_missing': str(imv_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'CVVH (non missing and > 0 blood_flow) (n, %)',
                        'Value': 'NOT AVAILABLE', 'n_missing': str(cvvh_n_missing), 'Notes': ''})
 
