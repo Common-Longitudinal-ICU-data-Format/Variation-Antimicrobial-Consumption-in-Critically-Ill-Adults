@@ -77,6 +77,7 @@ This file contains: - `Antibiotic`: Antibiotic names matching CLIF `med_category
 
 -   Adults (≥18 years old)
 -   First (index) ICU admission within `hospitalization_id` (`location_category == 'icu'`)
+-   Medical ICU only (`location_type == 'medical_icu'`)
 -   ICU admission between 2018-2024
 -   ICU discharge ≤2024 (excludes partial 2025 data)
 -   ICU length of stay \> 6 hours (0.25 days)
@@ -169,23 +170,17 @@ For each individual antibiotic, calculate standardized consumption rate.
 
 **Output**: Antibiotic-level metrics table (one row per antibiotic)
 
-### Step 4: Calculate Overall DOT per 1000 PD (Cohort + Location Stratification)
+### Step 4: Calculate Overall DOT per 1000 PD (Cohort-Level)
 
-#### Cohort-Level (All Antibiotics Combined)
-
-Calculate overall antibiotic consumption across **ALL** antibiotics.
+Calculate overall antibiotic consumption across **ALL** antibiotics for the MICU cohort.
 
 **Formula**: `Overall DOT per 1000 PD = (Total DOT all antibiotics / Total PD) × 1000`
 
 **Difference from Step 3**: Step 3 calculates per individual antibiotic; Step 4 aggregates across all antibiotics.
 
-#### Location-Type-Level Stratification
+**Note**: Since the cohort is restricted to Medical ICU only, location-type stratification is not performed.
 
-Same calculation stratified by ICU type (general ICU, cardiac ICU, surgical ICU, etc.).
-
-**Purpose**: Compare antibiotic consumption patterns across different ICU types.
-
-**Output**: - Cohort-level overall metrics - Location-type-level metrics
+**Output**: Cohort-level overall metrics
 
 ### Step 5: Calculate Daily ASC per Window
 
@@ -328,7 +323,6 @@ These files contain only aggregate summary statistics and are **safe to share** 
 
 -   `dot_antibiotic_level.csv` - DOT per 1000 PD by antibiotic (cohort-level)
 -   `dot_cohort_level.csv` - Overall DOT metrics (all antibiotics combined)
--   `dot_location_type_level.csv` - DOT per 1000 PD stratified by ICU type
 -   `daily_asc_summary.csv` - Mean/SD of daily ASC for Days 0-10 (for plotting)
 -   `dasc_overall.csv` - DASC per 1000 PD (all years combined)
 -   `dasc_by_year.csv` - DASC per 1000 PD by year (2018-2024)
@@ -351,4 +345,4 @@ Once both scripts (`01_cohort.py` and `02_DOT.py`) have completed successfully a
 
 **IMPORTANT**: Upload **ONLY** files from the `RESULTS_UPLOAD_ME/` folder. **DO NOT** upload files from `PHI_DATA/` folder as they contain patient-level data.
 
-**Upload Checklist**: - \[ \] `dot_antibiotic_level.csv` - \[ \] `dot_cohort_level.csv` - \[ \] `dot_location_type_level.csv` - \[ \] `daily_asc_summary.csv` - \[ \] `dasc_overall.csv` - \[ \] `dasc_by_year.csv` - \[ \] `asc_by_year_summary.csv` - \[ \] `afd_summary.csv` - \[ \] `table1_summary.json` - \[ \] `table1_summary.csv` - \[ \] `asc_by_year_plot.png` - \[ \] `asc_by_window_plot.png`
+**Upload Checklist**: - \[ \] `dot_antibiotic_level.csv` - \[ \] `dot_cohort_level.csv` - \[ \] `daily_asc_summary.csv` - \[ \] `dasc_overall.csv` - \[ \] `dasc_by_year.csv` - \[ \] `asc_by_year_summary.csv` - \[ \] `afd_summary.csv` - \[ \] `table1_summary.json` - \[ \] `table1_summary.csv` - \[ \] `asc_by_year_plot.png` - \[ \] `asc_by_window_plot.png`

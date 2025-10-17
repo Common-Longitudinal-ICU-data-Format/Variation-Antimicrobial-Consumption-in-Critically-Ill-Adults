@@ -180,6 +180,13 @@ def _(icu_data, pd):
     first_icu = icu_filtered.sort_values('in_dttm').groupby('hospitalization_id').first().reset_index()
 
     print(f"✓ First ICU stays: {len(first_icu):,} hospitalizations")
+
+    # Filter for Medical ICU (MICU) only
+    first_icu = first_icu[
+        first_icu['location_type'] == 'medical_icu'
+    ].copy()
+    print(f"✓ Medical ICU only: {len(first_icu):,} hospitalizations")
+
     return (first_icu,)
 
 
