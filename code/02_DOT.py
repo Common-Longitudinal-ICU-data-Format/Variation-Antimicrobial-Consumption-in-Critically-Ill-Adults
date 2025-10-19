@@ -373,7 +373,7 @@ def _(mo):
 
 
 @app.cell
-def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
+def _(abx_spectrum, cohort_df, meds_pl, pl, tqdm, windows_pl):
     # ============================================================
     # INITIALIZE DATA STRUCTURES AND LOOKUP TABLES
     # ============================================================
@@ -548,16 +548,24 @@ def _(abx_spectrum, meds_pl, pl, tqdm, windows_pl):
     dot_hospital_level = (
         dot_wide_pl
         .join(pd_per_hosp, on='hospitalization_id', how='left')
-        # Reorder columns: hospitalization_id, PD, then all antibiotics
+    )
+
+    # Join with patient_id from cohort
+    cohort_pl_for_join = pl.DataFrame(cohort_df[['patient_id', 'hospitalization_id']])
+    dot_hospital_level = (
+        dot_hospital_level
+        .join(cohort_pl_for_join, on='hospitalization_id', how='left')
+        # Reorder columns: patient_id, hospitalization_id, PD, then all antibiotics
         .select([
+            'patient_id',
             'hospitalization_id',
             'PD'
-        ] + [col for col in dot_wide_pl.columns if col != 'hospitalization_id'])
+        ] + [col for col in dot_hospital_level.columns if col not in ['patient_id', 'hospitalization_id', 'PD']])
     )
 
     print(f"✓ Hospital-level table created")
     print(f"  Shape: {dot_hospital_level.shape}")
-    print(f"  Columns: {len(dot_hospital_level.columns)} (hospitalization_id, PD, + {len(dot_hospital_level.columns)-2} antibiotics)")
+    print(f"  Columns: {len(dot_hospital_level.columns)} (patient_id, hospitalization_id, PD, + {len(dot_hospital_level.columns)-3} antibiotics)")
 
     # ============================================================
     # CREATE DAILY ASC DATAFRAMES
@@ -620,10 +628,10 @@ def _(abx_spectrum, dot_hospital_level, pl):
     print(f"  Total Patient-Days: {total_pd:,}")
     print(f"  Total Hospitalizations: {total_hospitalizations:,}")
 
-    # Get antibiotic columns (exclude hospitalization_id, PD, and ANTIBIOTIC_FREE)
+    # Get antibiotic columns (exclude patient_id, hospitalization_id, PD, and ANTIBIOTIC_FREE)
     antibiotic_cols = [
         col for col in dot_hospital_level.columns
-        if col not in ['hospitalization_id', 'PD', 'ANTIBIOTIC_FREE']
+        if col not in ['patient_id', 'hospitalization_id', 'PD', 'ANTIBIOTIC_FREE']
     ]
 
     print(f"  Antibiotics to analyze: {len(antibiotic_cols)}")
@@ -725,10 +733,10 @@ def _(cohort_df, dot_hospital_level, pl):
     # Calculate cohort-level overall DOT metrics
     print("Calculating overall DOT per 1000 Patient-Days...")
 
-    # Get antibiotic columns (exclude hospitalization_id, PD, ANTIBIOTIC_FREE)
+    # Get antibiotic columns (exclude patient_id, hospitalization_id, PD, ANTIBIOTIC_FREE)
     antibiotic_cols_for_total = [
         col for col in dot_hospital_level.columns
-        if col not in ['hospitalization_id', 'PD', 'ANTIBIOTIC_FREE']
+        if col not in ['patient_id', 'hospitalization_id', 'PD', 'ANTIBIOTIC_FREE']
     ]
 
     print(f"  Antibiotics for total DOT calculation: {len(antibiotic_cols_for_total)}")
