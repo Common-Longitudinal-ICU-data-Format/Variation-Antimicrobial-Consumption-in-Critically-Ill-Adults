@@ -7,13 +7,14 @@ amoxicillin_clavulanate,7
 ampicillin_sulbactam,8
 ceftazidime_avibactam,8
 ceftolozane_tazobactam,8
-ticarcillin_clavulanate,10
+ticaricillin_clavulanate,10
 piperacillin_tazobactam,11
 imipenem_relebactam,13
 meropenem_vaborbactam,13
 ertapenem,9
 doripenem,12
 imipenem,12
+meropenem,12
 cefadroxil,3
 cefazolin,3
 cefixime,3
@@ -52,7 +53,7 @@ daptomycin,6
 erythromycin,3
 clarithromycin,5
 azithromycin,6
-aztreonam,4
+aztronam,4
 nitrofurantoin,7
 metronidazole,2
 tinidazole,2
