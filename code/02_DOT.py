@@ -58,7 +58,8 @@ def _(mo):
 def _():
     import pandas as pd
     import numpy as np
-    from clifpy.tables import MedicationAdminIntermittent
+    from clifpy.tables import MedicationAdminIntermittent, HospitalDiagnosis
+    from clifpy.utils.comorbidity import calculate_elix, calculate_cci
     from pathlib import Path
     import warnings
     import json
@@ -72,7 +73,17 @@ def _():
         config = json.load(f)
     site_name = config.get('site', 'UNKNOWN_SITE')
     print(f"Site: {site_name}")
-    return MedicationAdminIntermittent, Path, json, np, pd, site_name
+    return (
+        HospitalDiagnosis,
+        MedicationAdminIntermittent,
+        Path,
+        calculate_cci,
+        calculate_elix,
+        json,
+        np,
+        pd,
+        site_name,
+    )
 
 
 @app.cell(hide_code=True)
@@ -102,6 +113,124 @@ def _(Path, pd):
     cohort_ids = cohort_df['hospitalization_id'].astype(str).unique().tolist()
     print(f"  Cohort IDs extracted: {len(cohort_ids):,}")
     return cohort_df, cohort_ids
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## Calculate Comorbidity Scores (Elixhauser & CCI)""")
+    return
+
+
+@app.cell
+def _(HospitalDiagnosis, cohort_df):
+    # Load hospital diagnosis data for comorbidity calculation
+    print("\n=== Comorbidity Score Calculation ===")
+    print("Loading hospital diagnosis data...")
+
+    cohort_hosp_ids_dx = cohort_df['hospitalization_id'].astype(str).unique().tolist()
+
+    hosp_dx_table = HospitalDiagnosis.from_file(
+        config_path='clif_config.json',
+        filters={
+            'hospitalization_id': cohort_hosp_ids_dx
+        },
+        columns=['hospitalization_id', 'diagnosis_code', 'diagnosis_code_format']
+    )
+
+    print(f"✓ Hospital diagnosis data loaded: {len(hosp_dx_table.df):,} records")
+    print(f"  Unique hospitalizations: {hosp_dx_table.df['hospitalization_id'].nunique():,}")
+    print(f"  ICD10CM codes: {(hosp_dx_table.df['diagnosis_code_format'] == 'ICD10CM').sum():,}")
+    return (hosp_dx_table,)
+
+
+@app.cell
+def _(calculate_elix, hosp_dx_table):
+    # Calculate Elixhauser Comorbidity Index
+    print("\nCalculating Elixhauser Comorbidity Index...")
+
+    elix_results = calculate_elix(hosp_dx_table, hierarchy=True)
+
+    print(f"\n✓ Elixhauser scores calculated: {len(elix_results):,} hospitalizations")
+    print(f"  Mean Elixhauser score: {elix_results['elix_score'].mean():.2f}")
+    print(f"  Median Elixhauser score: {elix_results['elix_score'].median():.2f}")
+    print(f"  Range: {elix_results['elix_score'].min():.0f} to {elix_results['elix_score'].max():.0f}")
+    return (elix_results,)
+
+
+@app.cell
+def _(calculate_cci, hosp_dx_table):
+    # Calculate Charlson Comorbidity Index
+    print("\nCalculating Charlson Comorbidity Index (CCI)...")
+
+    cci_results = calculate_cci(hosp_dx_table, hierarchy=True)
+
+    print(f"\n✓ CCI scores calculated: {len(cci_results):,} hospitalizations")
+    print(f"  Mean CCI score: {cci_results['cci_score'].mean():.2f}")
+    print(f"  Median CCI score: {cci_results['cci_score'].median():.2f}")
+    print(f"  Range: {cci_results['cci_score'].min():.0f} to {cci_results['cci_score'].max():.0f}")
+    return (cci_results,)
+
+
+@app.cell
+def _(cci_results, cohort_df, elix_results, pd):
+    # Merge comorbidity scores to cohort
+    print("\nMerging comorbidity scores to cohort...")
+
+    # Merge Elixhauser scores (select score and chronic_pulmonary column)
+    elix_cols_to_merge = ['hospitalization_id', 'elix_score']
+    # Check if chronic_pulmonary column exists (may be named differently)
+    elix_chronic_col = None
+    for col in elix_results.columns:
+        if 'chronic' in col.lower() and 'pulmonary' in col.lower():
+            elix_chronic_col = col
+            elix_cols_to_merge.append(col)
+            break
+
+    cohort_with_elix = pd.merge(
+        cohort_df,
+        elix_results[elix_cols_to_merge],
+        on='hospitalization_id',
+        how='left'
+    )
+
+    # Merge CCI scores (select score and chronic_pulmonary_disease column)
+    cci_cols_to_merge = ['hospitalization_id', 'cci_score']
+    # Check if chronic_pulmonary_disease column exists
+    cci_chronic_col = None
+    for col in cci_results.columns:
+        if 'chronic' in col.lower() and 'pulmonary' in col.lower():
+            cci_chronic_col = col
+            cci_cols_to_merge.append(col)
+            break
+
+    cohort_with_comorbidity = pd.merge(
+        cohort_with_elix,
+        cci_results[cci_cols_to_merge],
+        on='hospitalization_id',
+        how='left',
+        suffixes=('', '_cci')
+    )
+
+    # Create unified chronic_pulmonary_disease flag (1 if present in either index)
+    if elix_chronic_col or cci_chronic_col:
+        chronic_cols = []
+        if elix_chronic_col:
+            chronic_cols.append(cohort_with_comorbidity[elix_chronic_col])
+        if cci_chronic_col:
+            chronic_cols.append(cohort_with_comorbidity[cci_chronic_col])
+
+        # Take max across available columns (1 if present in any)
+        cohort_with_comorbidity['chronic_pulmonary_disease'] = pd.concat(chronic_cols, axis=1).max(axis=1).fillna(0).astype(int)
+    else:
+        # If no chronic pulmonary column found, set to 0
+        cohort_with_comorbidity['chronic_pulmonary_disease'] = 0
+        print("  Warning: No chronic pulmonary disease column found in comorbidity results")
+
+    print(f"✓ Comorbidity scores merged: {len(cohort_with_comorbidity):,} hospitalizations")
+    print(f"  Elixhauser available: {cohort_with_comorbidity['elix_score'].notna().sum():,}")
+    print(f"  CCI available: {cohort_with_comorbidity['cci_score'].notna().sum():,}")
+    print(f"  Chronic pulmonary disease: {(cohort_with_comorbidity['chronic_pulmonary_disease'] == 1).sum():,} ({(cohort_with_comorbidity['chronic_pulmonary_disease'] == 1).mean()*100:.1f}%)")
+    return (cohort_with_comorbidity,)
 
 
 @app.cell(hide_code=True)
@@ -222,14 +351,14 @@ def _(mo):
 
 
 @app.cell
-def _(cohort_df, meds_intermittent_df, pd):
+def _(cohort_with_comorbidity, meds_intermittent_df, pd):
     # Filter medication administrations to ICU stay windows
     print("Filtering medications to ICU stay windows...")
 
     # Merge with cohort to get start_dttm and end_dttm
     meds_with_windows = pd.merge(
         meds_intermittent_df,
-        cohort_df[['hospitalization_id', 'start_dttm', 'end_dttm']],
+        cohort_with_comorbidity[['hospitalization_id', 'start_dttm', 'end_dttm']],
         on='hospitalization_id',
         how='inner'
     )
@@ -265,12 +394,12 @@ def _():
 
 
 @app.cell
-def _(cohort_df, meds_icu_window, pl):
+def _(cohort_with_comorbidity, meds_icu_window, pl):
     # Prepare data structures
     print("Preparing data for analysis...")
 
     # Cohort
-    cohort_pl = pl.DataFrame(cohort_df)
+    cohort_pl = pl.DataFrame(cohort_with_comorbidity)
 
     # Medications
     meds_pl = pl.DataFrame(meds_icu_window)
@@ -373,7 +502,7 @@ def _(mo):
 
 
 @app.cell
-def _(abx_spectrum, cohort_df, meds_pl, pl, tqdm, windows_pl):
+def _(abx_spectrum, cohort_with_comorbidity, meds_pl, pl, tqdm, windows_pl):
     # ============================================================
     # INITIALIZE DATA STRUCTURES AND LOOKUP TABLES
     # ============================================================
@@ -551,7 +680,7 @@ def _(abx_spectrum, cohort_df, meds_pl, pl, tqdm, windows_pl):
     )
 
     # Join with patient_id from cohort
-    cohort_pl_for_join = pl.DataFrame(cohort_df[['patient_id', 'hospitalization_id']])
+    cohort_pl_for_join = pl.DataFrame(cohort_with_comorbidity[['patient_id', 'hospitalization_id']])
     dot_hospital_level = (
         dot_hospital_level
         .join(cohort_pl_for_join, on='hospitalization_id', how='left')
@@ -729,7 +858,7 @@ def _(mo):
 
 
 @app.cell
-def _(cohort_df, dot_hospital_level, pl):
+def _(dot_hospital_level, pl):
     # Calculate cohort-level overall DOT metrics
     print("Calculating overall DOT per 1000 Patient-Days...")
 
@@ -899,7 +1028,12 @@ def _(mo):
 
 
 @app.cell
-def _(cohort_df, daily_asc_patient_level, dot_hospital_level, pl):
+def _(
+    cohort_with_comorbidity,
+    daily_asc_patient_level,
+    dot_hospital_level,
+    pl,
+):
     # Calculate DASC per 1000 Patient-Days
     print("Calculating DASC per 1000 Patient-Days...")
 
@@ -947,7 +1081,7 @@ def _(cohort_df, daily_asc_patient_level, dot_hospital_level, pl):
     print("\n=== DASC Metrics by Year ===")
 
     # Extract year from cohort start_dttm
-    cohort_with_year = pl.DataFrame(cohort_df).select([
+    cohort_with_year = pl.DataFrame(cohort_with_comorbidity).select([
         'hospitalization_id',
         pl.col('start_dttm').dt.year().alias('year')
     ])
@@ -1206,113 +1340,6 @@ def _(daily_asc_patient_level, pl, windows_pl):
     print(f"  Total windows: {asc_by_year_summary['n_windows'].sum():,}")
     print(f"\n📊 This data enables time series plotting of ASC trends over years 2018-2024")
     return (asc_by_year_summary,)
-
-
-# REMOVED: Location-type stratified analysis not needed for MICU-only cohort
-# @app.cell
-# def _(cohort_df, daily_asc_patient_level, pl, windows_pl):
-#     # SUB-ANALYSIS: Calculate ASC by Year stratified by Location Type
-#     print("\n=== SUB-ANALYSIS: ASC by Year × Location Type ===")
-#     print("Calculating location-type-stratified ASC trends by year...")
-#
-#     # Join daily_asc with cohort to get location_type
-#     print("\nJoining daily ASC data with cohort to get location_type...")
-#     asc_with_location = (
-#         daily_asc_patient_level
-#         .join(
-#             pl.DataFrame(cohort_df[['hospitalization_id', 'location_type']]),
-#             on='hospitalization_id',
-#             how='left'
-#         )
-#     )
-#
-#     # Join with windows to get timestamps
-#     asc_location_with_timestamps = (
-#         asc_with_location
-#         .join(
-#             windows_pl.select(['hospitalization_id', 'window_num', 'window_start']),
-#             on=['hospitalization_id', 'window_num'],
-#             how='left'
-#         )
-#     )
-#
-#     # Extract year
-#     asc_location_with_year = asc_location_with_timestamps.with_columns(
-#         pl.col('window_start').dt.year().alias('year')
-#     )
-#
-#     # Group by year AND location_type
-#     print("\nCalculating summary statistics by year AND location_type...")
-#     asc_by_year_location = (
-#         asc_location_with_year
-#         .group_by(['year', 'location_type'])
-#         .agg([
-#             pl.col('daily_asc').mean().alias('mean_asc'),
-#             pl.col('daily_asc').std().alias('sd_asc'),
-#             pl.col('daily_asc').median().alias('median_asc'),
-#             pl.col('window_num').count().alias('n_windows'),
-#             pl.col('hospitalization_id').n_unique().alias('n_hospitalizations')
-#         ])
-#         .with_columns([
-#             (pl.col('sd_asc') / pl.col('n_windows').sqrt()).alias('se_asc'),
-#             (pl.col('mean_asc') - 1.96 * (pl.col('sd_asc') / pl.col('n_windows').sqrt())).alias('lower_ci_asc'),
-#             (pl.col('mean_asc') + 1.96 * (pl.col('sd_asc') / pl.col('n_windows').sqrt())).alias('upper_ci_asc')
-#         ])
-#         .sort(['location_type', 'year'])
-#     )
-#
-#     print(f"\n✓ ASC by Year × Location Type calculated")
-#     print(f"  Location types: {asc_by_year_location['location_type'].n_unique()}")
-#     print(f"  Year range: {asc_by_year_location['year'].min()} - {asc_by_year_location['year'].max()}")
-#     print(f"\n=== ASC by Year × Location Type Summary ===")
-#     print(asc_by_year_location.to_pandas().to_string(index=False))
-#     return (asc_by_year_location,)
-
-
-# REMOVED: Location-type stratified analysis not needed for MICU-only cohort
-# @app.cell
-# def _(cohort_df, daily_asc_patient_level, pl):
-#     # SUB-ANALYSIS: Calculate ASC by ICU Day (Window) stratified by Location Type
-#     print("\n=== SUB-ANALYSIS: ASC by ICU Day × Location Type ===")
-#     print("Calculating location-type-stratified ASC trends by ICU day...")
-#
-#     # Join daily_asc with cohort to get location_type
-#     print("\nJoining daily ASC data with cohort to get location_type...")
-#     asc_window_with_location = (
-#         daily_asc_patient_level
-#         .join(
-#             pl.DataFrame(cohort_df[['hospitalization_id', 'location_type']]),
-#             on='hospitalization_id',
-#             how='left'
-#         )
-#         .filter(pl.col('window_num') <= 10)  # Filter to windows 0-10
-#     )
-#
-#     # Group by window_num AND location_type
-#     print("\nCalculating summary statistics by window AND location_type...")
-#     asc_by_window_location = (
-#         asc_window_with_location
-#         .group_by(['window_num', 'location_type'])
-#         .agg([
-#             pl.col('daily_asc').mean().alias('mean_asc'),
-#             pl.col('daily_asc').std().alias('sd_asc'),
-#             pl.col('daily_asc').median().alias('median_asc'),
-#             pl.col('hospitalization_id').count().alias('n_hospitalizations')
-#         ])
-#         .with_columns([
-#             (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt()).alias('se_asc'),
-#             (pl.col('mean_asc') - 1.96 * (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt())).alias('lower_ci_asc'),
-#             (pl.col('mean_asc') + 1.96 * (pl.col('sd_asc') / pl.col('n_hospitalizations').sqrt())).alias('upper_ci_asc')
-#         ])
-#         .sort(['location_type', 'window_num'])
-#     )
-#
-#     print(f"\n✓ ASC by ICU Day × Location Type calculated")
-#     print(f"  Location types: {asc_by_window_location['location_type'].n_unique()}")
-#     print(f"  ICU days: 0-{asc_by_window_location['window_num'].max()}")
-#     print(f"\n=== ASC by Window × Location Type Summary ===")
-#     print(asc_by_window_location.to_pandas().to_string(index=False))
-#     return (asc_by_window_location,)
 
 
 @app.cell(hide_code=True)
@@ -1629,187 +1656,6 @@ def _(Path, daily_asc_summary, np, plt, scipy):
     return
 
 
-# REMOVED: Location-type stratified visualizations not needed for MICU-only cohort
-# @app.cell(hide_code=True)
-# def _(mo):
-#     mo.md(r"""## SUB-ANALYSIS: Location-Type Stratified Visualizations""")
-#     return
-
-
-# REMOVED: Location-type stratified plot not needed for MICU-only cohort
-# @app.cell
-# def _(Path, asc_by_year_location, np, plt, scipy):
-#     # Plot 3: ASC Trend by Year (Location-Type Stratified)
-#     print("\n=== CREATING SUB-ANALYSIS PLOT 3: ASC by Year × Location Type ===")
-#     print("Creating multi-line plot with all location types...")
-#
-#     # Convert to pandas for easier plotting
-#     df_year_loc = asc_by_year_location.to_pandas()
-#
-#     # Get unique location types
-#     location_types_yr = df_year_loc['location_type'].unique()
-#     print(f"Location types to plot: {len(location_types_yr)}")
-#
-#     # Define color palette (use distinct colors for each location type)
-#     color_palette_yr = ['#2E86AB', '#A23B72', '#F18F01', '#06A77D', '#C73E1D',
-#                         '#6A4C93', '#1B998B', '#E63946', '#457B9D', '#F4A261']
-#     colors_yr = {loc: color_palette_yr[i % len(color_palette_yr)]
-#                  for i, loc in enumerate(location_types_yr)}
-#
-#     # Create figure
-#     fig_year_loc, ax_year_loc = plt.subplots(figsize=(12, 7))
-#
-#     # Plot each location type
-#     for loc_type_yr in location_types_yr:
-#         df_loc_yr = df_year_loc[df_year_loc['location_type'] == loc_type_yr].sort_values('year')
-#
-#         if len(df_loc_yr) == 0:
-#             continue
-#
-#         years_yr = df_loc_yr['year'].values
-#         mean_asc_yr = df_loc_yr['mean_asc'].values
-#         lower_ci_yr = df_loc_yr['lower_ci_asc'].values
-#         upper_ci_yr = df_loc_yr['upper_ci_asc'].values
-#
-#         color_yr = colors_yr[loc_type_yr]
-#
-#         # Create spline interpolation if enough points
-#         if len(years_yr) >= 4:
-#             years_smooth_yr = np.linspace(years_yr.min(), years_yr.max(), 300)
-#             spline_yr = scipy.interpolate.make_interp_spline(years_yr, mean_asc_yr, k=min(3, len(years_yr)-1))
-#             mean_smooth_yr = spline_yr(years_smooth_yr)
-#
-#             spline_lower_yr = scipy.interpolate.make_interp_spline(years_yr, lower_ci_yr, k=min(3, len(years_yr)-1))
-#             lower_smooth_yr = spline_lower_yr(years_smooth_yr)
-#
-#             spline_upper_yr = scipy.interpolate.make_interp_spline(years_yr, upper_ci_yr, k=min(3, len(years_yr)-1))
-#             upper_smooth_yr = spline_upper_yr(years_smooth_yr)
-#         else:
-#             years_smooth_yr = years_yr
-#             mean_smooth_yr = mean_asc_yr
-#             lower_smooth_yr = lower_ci_yr
-#             upper_smooth_yr = upper_ci_yr
-#
-#         # Plot mean line
-#         ax_year_loc.plot(years_smooth_yr, mean_smooth_yr, color=color_yr, linewidth=2.5, label=loc_type_yr)
-#
-#         # Plot error band (95% CI)
-#         ax_year_loc.fill_between(years_smooth_yr, lower_smooth_yr, upper_smooth_yr,
-#                                   alpha=0.2, color=color_yr)
-#
-#         # Plot original data points
-#         ax_year_loc.scatter(years_yr, mean_asc_yr, color=color_yr, s=60, zorder=5, alpha=0.7)
-#
-#     # Styling
-#     ax_year_loc.set_xlabel('Year', fontsize=12, fontweight='bold')
-#     ax_year_loc.set_ylabel('Mean Antibiotic Spectrum Coverage (ASC)', fontsize=12, fontweight='bold')
-#     ax_year_loc.set_title('ASC Trend by Year Stratified by ICU Location Type\n(Sub-Analysis)',
-#                           fontsize=14, fontweight='bold', pad=20)
-#     ax_year_loc.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-#     ax_year_loc.legend(loc='best', frameon=True, shadow=True, fontsize=9, ncol=2)
-#
-#     # Format x-axis
-#     all_years_yr = sorted(df_year_loc['year'].unique())
-#     ax_year_loc.set_xticks(all_years_yr)
-#     ax_year_loc.set_xticklabels([int(y) for y in all_years_yr])
-#
-#     plt.tight_layout()
-#
-#     # Save
-#     plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_by_location_type.png', dpi=300, bbox_inches='tight')
-#     print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_by_location_type.png")
-#
-#     plt.close()
-#     return
-
-
-# REMOVED: Location-type stratified plot not needed for MICU-only cohort
-# @app.cell
-# def _(Path, asc_by_window_location, np, plt, scipy):
-#     # Plot 4: ASC Trend by ICU Day (Location-Type Stratified)
-#     print("\n=== CREATING SUB-ANALYSIS PLOT 4: ASC by ICU Day × Location Type ===")
-#     print("Creating multi-line plot with all location types...")
-#
-#     # Convert to pandas for easier plotting
-#     df_window_loc = asc_by_window_location.to_pandas()
-#
-#     # Get unique location types
-#     location_types_day = df_window_loc['location_type'].unique()
-#     print(f"Location types to plot: {len(location_types_day)}")
-#
-#     # Define color palette (same as Plot 3 for consistency)
-#     color_palette_day = ['#2E86AB', '#A23B72', '#F18F01', '#06A77D', '#C73E1D',
-#                          '#6A4C93', '#1B998B', '#E63946', '#457B9D', '#F4A261']
-#     colors_day = {loc: color_palette_day[i % len(color_palette_day)]
-#                   for i, loc in enumerate(location_types_day)}
-#
-#     # Create figure
-#     fig_day_loc, ax_day_loc = plt.subplots(figsize=(12, 7))
-#
-#     # Plot each location type
-#     for loc_type_day in location_types_day:
-#         df_loc_day = df_window_loc[df_window_loc['location_type'] == loc_type_day].sort_values('window_num')
-#
-#         if len(df_loc_day) == 0:
-#             continue
-#
-#         windows_day = df_loc_day['window_num'].values
-#         mean_asc_day = df_loc_day['mean_asc'].values
-#         lower_ci_day = df_loc_day['lower_ci_asc'].values
-#         upper_ci_day = df_loc_day['upper_ci_asc'].values
-#
-#         color_day = colors_day[loc_type_day]
-#
-#         # Create spline interpolation if enough points
-#         if len(windows_day) >= 4:
-#             windows_smooth_day = np.linspace(windows_day.min(), windows_day.max(), 300)
-#             spline_day = scipy.interpolate.make_interp_spline(windows_day, mean_asc_day, k=min(3, len(windows_day)-1))
-#             mean_smooth_day = spline_day(windows_smooth_day)
-#
-#             spline_lower_day = scipy.interpolate.make_interp_spline(windows_day, lower_ci_day, k=min(3, len(windows_day)-1))
-#             lower_smooth_day = spline_lower_day(windows_smooth_day)
-#
-#             spline_upper_day = scipy.interpolate.make_interp_spline(windows_day, upper_ci_day, k=min(3, len(windows_day)-1))
-#             upper_smooth_day = spline_upper_day(windows_smooth_day)
-#         else:
-#             windows_smooth_day = windows_day
-#             mean_smooth_day = mean_asc_day
-#             lower_smooth_day = lower_ci_day
-#             upper_smooth_day = upper_ci_day
-#
-#         # Plot mean line
-#         ax_day_loc.plot(windows_smooth_day, mean_smooth_day, color=color_day, linewidth=2.5, label=loc_type_day)
-#
-#         # Plot error band (95% CI)
-#         ax_day_loc.fill_between(windows_smooth_day, lower_smooth_day, upper_smooth_day,
-#                                 alpha=0.2, color=color_day)
-#
-#         # Plot original data points
-#         ax_day_loc.scatter(windows_day, mean_asc_day, color=color_day, s=60, zorder=5, alpha=0.7)
-#
-#     # Styling
-#     ax_day_loc.set_xlabel('ICU Day', fontsize=12, fontweight='bold')
-#     ax_day_loc.set_ylabel('Mean Antibiotic Spectrum Coverage (ASC)', fontsize=12, fontweight='bold')
-#     ax_day_loc.set_title('ASC Trend by ICU Day Stratified by ICU Location Type\n(Sub-Analysis)',
-#                          fontsize=14, fontweight='bold', pad=20)
-#     ax_day_loc.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-#     ax_day_loc.legend(loc='best', frameon=True, shadow=True, fontsize=9, ncol=2)
-#
-#     # Format x-axis
-#     all_windows_day = sorted(df_window_loc['window_num'].unique())
-#     ax_day_loc.set_xticks(all_windows_day)
-#     ax_day_loc.set_xticklabels([int(w) for w in all_windows_day])
-#
-#     plt.tight_layout()
-#
-#     # Save
-#     plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_window_by_location_type.png', dpi=300, bbox_inches='tight')
-#     print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_window_by_location_type.png")
-#
-#     plt.close()
-#     return
-
-
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""## Generate Table 1: Summary Statistics for Multi-Site Comparison""")
@@ -1820,7 +1666,7 @@ def _(mo):
 def _(
     Path,
     afd_summary,
-    cohort_df,
+    cohort_with_comorbidity,
     daily_asc_summary,
     dasc_overall,
     dot_antibiotic_level,
@@ -1835,7 +1681,7 @@ def _(
     # DEMOGRAPHICS & BASELINE
     # ============================================================
 
-    cohort_pl_t1 = pl.DataFrame(cohort_df)
+    cohort_pl_t1 = pl.DataFrame(cohort_with_comorbidity)
 
     t1_total_patients = len(cohort_pl_t1)
 
@@ -1870,6 +1716,16 @@ def _(
     # Severity
     sofa_n_missing = cohort_pl_t1['sofa_total'].is_null().sum() if 'sofa_total' in cohort_pl_t1.columns else t1_total_patients
     sofa_pct_missing = (sofa_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    # Comorbidity Scores
+    elix_score_n_missing = cohort_pl_t1['elix_score'].is_null().sum() if 'elix_score' in cohort_pl_t1.columns else t1_total_patients
+    elix_score_pct_missing = (elix_score_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    cci_score_n_missing = cohort_pl_t1['cci_score'].is_null().sum() if 'cci_score' in cohort_pl_t1.columns else t1_total_patients
+    cci_score_pct_missing = (cci_score_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
+    chronic_pulm_n_missing = cohort_pl_t1['chronic_pulmonary_disease'].is_null().sum() if 'chronic_pulmonary_disease' in cohort_pl_t1.columns else t1_total_patients
+    chronic_pulm_pct_missing = (chronic_pulm_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
 
     # Interventions
     vasopressor_n_missing = cohort_pl_t1['vasopressor_ever'].is_null().sum() if 'vasopressor_ever' in cohort_pl_t1.columns else t1_total_patients
@@ -1959,6 +1815,19 @@ def _(
 
     t1_mean_highest_sofa = cohort_pl_t1['sofa_total'].mean()
     t1_sd_highest_sofa = cohort_pl_t1['sofa_total'].std()
+
+    # Comorbidity Scores
+    t1_mean_elix_score = cohort_pl_t1['elix_score'].mean() if 'elix_score' in cohort_pl_t1.columns else None
+    t1_sd_elix_score = cohort_pl_t1['elix_score'].std() if 'elix_score' in cohort_pl_t1.columns else None
+
+    t1_mean_cci_score = cohort_pl_t1['cci_score'].mean() if 'cci_score' in cohort_pl_t1.columns else None
+    t1_sd_cci_score = cohort_pl_t1['cci_score'].std() if 'cci_score' in cohort_pl_t1.columns else None
+
+    t1_chronic_pulm_n = None
+    t1_chronic_pulm_pct = None
+    if 'chronic_pulmonary_disease' in cohort_pl_t1.columns:
+        t1_chronic_pulm_n = cohort_pl_t1.filter(pl.col('chronic_pulmonary_disease') == 1).shape[0]
+        t1_chronic_pulm_pct = (t1_chronic_pulm_n / t1_total_patients * 100)
 
     # Interventions (n, %)
     t1_vasopressor_ever_n = cohort_pl_t1['vasopressor_ever'].sum()
@@ -2055,6 +1924,12 @@ def _(
             "lowest_map_sd": float(t1_sd_lowest_map),
             "highest_sofa_mean": float(t1_mean_highest_sofa),
             "highest_sofa_sd": float(t1_sd_highest_sofa),
+            "elixhauser_score_mean": float(t1_mean_elix_score) if t1_mean_elix_score is not None else "NOT_AVAILABLE",
+            "elixhauser_score_sd": float(t1_sd_elix_score) if t1_sd_elix_score is not None else "NOT_AVAILABLE",
+            "cci_score_mean": float(t1_mean_cci_score) if t1_mean_cci_score is not None else "NOT_AVAILABLE",
+            "cci_score_sd": float(t1_sd_cci_score) if t1_sd_cci_score is not None else "NOT_AVAILABLE",
+            "chronic_pulmonary_disease_n": int(t1_chronic_pulm_n) if t1_chronic_pulm_n is not None else "NOT_AVAILABLE",
+            "chronic_pulmonary_disease_pct": float(t1_chronic_pulm_pct) if t1_chronic_pulm_pct is not None else "NOT_AVAILABLE",
             "vasopressor_ever_n": int(t1_vasopressor_ever_n),
             "vasopressor_ever_pct": float(t1_vasopressor_ever_pct),
             "nippv_ever_n": int(t1_nippv_ever_n),
@@ -2123,6 +1998,18 @@ def _(
             "sofa_total": {
                 "n_missing": int(sofa_n_missing),
                 "pct_missing": float(sofa_pct_missing)
+            },
+            "elix_score": {
+                "n_missing": int(elix_score_n_missing),
+                "pct_missing": float(elix_score_pct_missing)
+            },
+            "cci_score": {
+                "n_missing": int(cci_score_n_missing),
+                "pct_missing": float(cci_score_pct_missing)
+            },
+            "chronic_pulmonary_disease": {
+                "n_missing": int(chronic_pulm_n_missing),
+                "pct_missing": float(chronic_pulm_pct_missing)
             },
             "vasopressor_ever": {
                 "n_missing": int(vasopressor_n_missing),
@@ -2236,6 +2123,28 @@ def _(
 
     t1_table1_rows.append({'Category': 'Severity', 'Variable': 'Highest SOFA score in 1st 24 hours (mean, SD)',
                        'Value': f"{t1_mean_highest_sofa:.1f} ± {t1_sd_highest_sofa:.1f}", 'n_missing': str(sofa_n_missing), 'Notes': ''})
+
+    # Comorbidity Scores
+    if t1_mean_elix_score is not None:
+        t1_table1_rows.append({'Category': 'Comorbidity', 'Variable': 'Elixhauser Score (mean, SD)',
+                           'Value': f"{t1_mean_elix_score:.1f} ± {t1_sd_elix_score:.1f}", 'n_missing': str(elix_score_n_missing), 'Notes': ''})
+    else:
+        t1_table1_rows.append({'Category': 'Comorbidity', 'Variable': 'Elixhauser Score (mean, SD)',
+                           'Value': 'NOT AVAILABLE', 'n_missing': str(elix_score_n_missing), 'Notes': ''})
+
+    if t1_mean_cci_score is not None:
+        t1_table1_rows.append({'Category': 'Comorbidity', 'Variable': 'CCI Score (mean, SD)',
+                           'Value': f"{t1_mean_cci_score:.1f} ± {t1_sd_cci_score:.1f}", 'n_missing': str(cci_score_n_missing), 'Notes': ''})
+    else:
+        t1_table1_rows.append({'Category': 'Comorbidity', 'Variable': 'CCI Score (mean, SD)',
+                           'Value': 'NOT AVAILABLE', 'n_missing': str(cci_score_n_missing), 'Notes': ''})
+
+    if t1_chronic_pulm_n is not None:
+        t1_table1_rows.append({'Category': 'Comorbidity', 'Variable': 'Chronic Pulmonary Disease (n, %)',
+                           'Value': f"{t1_chronic_pulm_n} ({t1_chronic_pulm_pct:.1f}%)", 'n_missing': str(chronic_pulm_n_missing), 'Notes': ''})
+    else:
+        t1_table1_rows.append({'Category': 'Comorbidity', 'Variable': 'Chronic Pulmonary Disease (n, %)',
+                           'Value': 'NOT AVAILABLE', 'n_missing': str(chronic_pulm_n_missing), 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'Vasopressor_ever (n, %)',
                        'Value': f"{t1_vasopressor_ever_n} ({t1_vasopressor_ever_pct:.1f}%)", 'n_missing': str(vasopressor_n_missing), 'Notes': ''})
