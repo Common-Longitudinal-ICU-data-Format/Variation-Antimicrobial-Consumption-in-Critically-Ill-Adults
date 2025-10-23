@@ -49,7 +49,7 @@ def _(mo):
     - Outlier handling applied using clifpy built-in functions
     - Categories: wbc, creatinine
     - Aggregations: max (worst values)
-    - Units: WBC in 10^3/μL, Creatinine in mg/dL
+    - Units: WBC in 10^3/uL, Creatinine in mg/dL
 
     **Respiratory Support:**
     - Loaded using clifpy RespiratorySupport table
@@ -113,17 +113,17 @@ def _(Adt, Hospitalization, Patient):
     # Load ADT data
     adt_table = Adt.from_file(config_path='clif_config.json')
     adt_df = adt_table.df.copy()
-    print(f"✓ ADT data loaded: {len(adt_df):,} records")
+    print(f"ADT data loaded: {len(adt_df):,} records")
 
     # Load hospitalization data
     hosp_table = Hospitalization.from_file(config_path='clif_config.json')
     hosp_df = hosp_table.df.copy()
-    print(f"✓ Hospitalization data loaded: {len(hosp_df):,} records")
+    print(f"Hospitalization data loaded: {len(hosp_df):,} records")
 
     # Load patient data
     patient_table = Patient.from_file(config_path='clif_config.json')
     patient_df = patient_table.df.copy()
-    print(f"✓ Patient data loaded: {len(patient_df):,} records")
+    print(f"Patient data loaded: {len(patient_df):,} records")
     return adt_df, hosp_df, patient_df
 
 
@@ -148,7 +148,7 @@ def _(adt_df, hosp_df, pd):
     # Normalize location_category to lowercase for consistent matching
     icu_data['location_category'] = icu_data['location_category'].str.lower()
 
-    print(f"✓ Merged data: {len(icu_data):,} records")
+    print(f"Merged data: {len(icu_data):,} records")
     return (icu_data,)
 
 
@@ -173,18 +173,18 @@ def _(icu_data, pd):
         (icu_data['age_at_admission'].notna())
     ].copy()
 
-    print(f"✓ ICU admissions (2018-2024, adults, ICU discharge ≤2024): {len(icu_filtered):,} records")
+    print(f"ICU admissions (2018-2024, adults, ICU discharge ≤2024): {len(icu_filtered):,} records")
 
     # Get first ICU stay per hospitalization
     first_icu = icu_filtered.sort_values('in_dttm').groupby('hospitalization_id').first().reset_index()
 
-    print(f"✓ First ICU stays: {len(first_icu):,} hospitalizations")
+    print(f"First ICU stays: {len(first_icu):,} hospitalizations")
 
     # Filter for Medical ICU (MICU) only
     first_icu = first_icu[
         first_icu['location_type'] == 'medical_icu'
     ].copy()
-    print(f"✓ Medical ICU only: {len(first_icu):,} hospitalizations")
+    print(f"Medical ICU only: {len(first_icu):,} hospitalizations")
     return (first_icu,)
 
 
@@ -284,7 +284,7 @@ def _(first_icu, patient_df, pd):
     cohort_df = cohort_df[cohort_df['icu_los_days'] > 0.25].copy()
     removed_short_los = cohort_before_los_filter - len(cohort_df)
     if removed_short_los > 0:
-        print(f"⚠ Removed {removed_short_los:,} encounters with short ICU LOS (≤6 hours / 0.25 days)")
+        print(f"WARNING: Removed {removed_short_los:,} encounters with short ICU LOS (<=6 hours / 0.25 days)")
 
     # Reorder columns (vital columns will be added after vitals processing)
     base_columns = [
@@ -309,7 +309,7 @@ def _(first_icu, patient_df, pd):
     # Only select columns that exist in cohort_df at this point
     cohort_df = cohort_df[[col for col in base_columns if col in cohort_df.columns]]
 
-    print(f"✓ Final cohort: {len(cohort_df):,} hospitalizations")
+    print(f"Final cohort: {len(cohort_df):,} hospitalizations")
     return (cohort_df,)
 
 
@@ -342,12 +342,12 @@ def _(Vitals, apply_outlier_handling, cohort_df):
         columns=['hospitalization_id', 'recorded_dttm', 'vital_category', 'vital_value']
     )
 
-    print(f"✓ Vitals loaded: {len(vitals_table.df):,} records")
+    print(f"Vitals loaded: {len(vitals_table.df):,} records")
 
     # Apply outlier handling using clifpy
     print("Applying outlier handling to vitals...")
     apply_outlier_handling(vitals_table)
-    print(f"✓ Outlier handling applied")
+    print(f"Outlier handling applied")
     print(f"  Records after outlier removal: {len(vitals_table.df):,}")
 
     # Get vitals dataframe
@@ -374,7 +374,7 @@ def _(cohort_df, pd, vitals_df):
         (vitals_with_windows['recorded_dttm'] <= vitals_with_windows['end_dttm'])
     ].copy()
 
-    print(f"✓ Vitals filtered to ICU windows: {len(vitals_icu_window):,} records")
+    print(f"Vitals filtered to ICU windows: {len(vitals_icu_window):,} records")
 
     # Calculate aggregates by hospitalization_id and vital_category
     print("Calculating vital sign aggregates...")
@@ -402,7 +402,7 @@ def _(cohort_df, pd, vitals_df):
     vitals_existing_mappings = {k: v for k, v in vitals_column_mapping.items() if k in vitals_pivot.columns}
     vitals_pivot = vitals_pivot.rename(columns=vitals_existing_mappings)
 
-    print(f"✓ Vital aggregates calculated for {len(vitals_pivot):,} hospitalizations")
+    print(f"Vital aggregates calculated for {len(vitals_pivot):,} hospitalizations")
     print(f"  Columns: {[col for col in vitals_pivot.columns if col != 'hospitalization_id']}")
 
     # Merge vitals back to cohort_df
@@ -413,7 +413,7 @@ def _(cohort_df, pd, vitals_df):
         how='left'
     )
 
-    print(f"✓ Vitals merged to cohort: {len(cohort_with_vitals):,} hospitalizations")
+    print(f"Vitals merged to cohort: {len(cohort_with_vitals):,} hospitalizations")
 
     # Reorder columns with vitals included
     final_column_order = [
@@ -478,7 +478,7 @@ def _(MedicationAdminContinuous, cohort_df):
     )
 
     meds_df = med_table.df.copy()
-    print(f"✓ Medications loaded: {len(meds_df):,} records")
+    print(f"Medications loaded: {len(meds_df):,} records")
     return (meds_df,)
 
 
@@ -504,7 +504,7 @@ def _(cohort_df, meds_df, pd):
         (meds_with_windows['admin_dttm'] <= meds_with_windows['end_dttm'])
     ].copy()
 
-    print(f"✓ Medications filtered to ICU windows: {len(meds_icu_window):,} records")
+    print(f"Medications filtered to ICU windows: {len(meds_icu_window):,} records")
 
     # Calculate vasopressor metrics per hospitalization
     print("Calculating vasopressor metrics...")
@@ -518,7 +518,7 @@ def _(cohort_df, meds_df, pd):
     # Add binary flag: 1 if any vasopressor used, 0 otherwise
     vaso_summary['vasopressor_ever'] = 1
 
-    print(f"✓ Vasopressor metrics calculated for {len(vaso_summary):,} hospitalizations")
+    print(f"Vasopressor metrics calculated for {len(vaso_summary):,} hospitalizations")
     print(f"  Vasopressor usage distribution:")
     print(vaso_summary['no_of_vasopressor'].value_counts().sort_index().to_dict())
     return (vaso_summary,)
@@ -540,7 +540,7 @@ def _(cohort_with_vitals_df, pd, vaso_summary):
     cohort_with_meds['vasopressor_ever'] = cohort_with_meds['vasopressor_ever'].fillna(0).astype(int)
     cohort_with_meds['no_of_vasopressor'] = cohort_with_meds['no_of_vasopressor'].fillna(0).astype(int)
 
-    print(f"✓ Vasopressor metrics merged to cohort: {len(cohort_with_meds):,} hospitalizations")
+    print(f"Vasopressor metrics merged to cohort: {len(cohort_with_meds):,} hospitalizations")
     print(f"  Hospitalizations with vasopressors: {(cohort_with_meds['vasopressor_ever'] == 1).sum():,} ({(cohort_with_meds['vasopressor_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without vasopressors: {(cohort_with_meds['vasopressor_ever'] == 0).sum():,} ({(cohort_with_meds['vasopressor_ever'] == 0).mean()*100:.1f}%)")
 
@@ -605,12 +605,12 @@ def _(Labs, apply_outlier_handling, cohort_df):
         columns=['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value_numeric']
     )
 
-    print(f"✓ Labs loaded: {len(labs_table.df):,} records")
+    print(f"Labs loaded: {len(labs_table.df):,} records")
 
     # Apply outlier handling using clifpy
     print("Applying outlier handling to labs...")
     apply_outlier_handling(labs_table)
-    print(f"✓ Outlier handling applied")
+    print(f"Outlier handling applied")
     print(f"  Records after outlier removal: {len(labs_table.df):,}")
 
     # Get labs dataframe
@@ -640,7 +640,7 @@ def _(cohort_df, labs_df, pd):
         (labs_with_windows['lab_result_dttm'] <= labs_with_windows['end_dttm'])
     ].copy()
 
-    print(f"✓ Labs filtered to ICU windows: {len(labs_icu_window):,} records")
+    print(f"Labs filtered to ICU windows: {len(labs_icu_window):,} records")
 
     # Calculate max values per hospitalization and lab_category
     print("Calculating maximum lab values...")
@@ -663,7 +663,7 @@ def _(cohort_df, labs_df, pd):
     labs_existing_mappings = {k: v for k, v in labs_column_mapping.items() if k in labs_pivot.columns}
     labs_pivot = labs_pivot.rename(columns=labs_existing_mappings)
 
-    print(f"✓ Lab aggregates calculated for {len(labs_pivot):,} hospitalizations")
+    print(f"Lab aggregates calculated for {len(labs_pivot):,} hospitalizations")
     print(f"  Columns: {[col for col in labs_pivot.columns if col != 'hospitalization_id']}")
     return (labs_pivot,)
 
@@ -680,7 +680,7 @@ def _(cohort_final, labs_pivot, pd):
         how='left'
     )
 
-    print(f"✓ Labs merged to cohort: {len(cohort_with_labs):,} hospitalizations")
+    print(f"Labs merged to cohort: {len(cohort_with_labs):,} hospitalizations")
 
     # Reorder columns with labs included
     final_column_order_with_labs = [
@@ -742,7 +742,7 @@ def _(RespiratorySupport, cohort_df):
     )
 
     resp_df = resp_table.df.copy()
-    print(f"✓ Respiratory support loaded: {len(resp_df):,} records")
+    print(f"Respiratory support loaded: {len(resp_df):,} records")
 
     # Show device category distribution
     if 'device_category' in resp_df.columns:
@@ -773,7 +773,7 @@ def _(cohort_df, pd, resp_df):
         (resp_with_windows['recorded_dttm'] <= resp_with_windows['end_dttm'])
     ].copy()
 
-    print(f"✓ Respiratory support filtered to ICU windows: {len(resp_icu_window):,} records")
+    print(f"Respiratory support filtered to ICU windows: {len(resp_icu_window):,} records")
 
     # Create NIPPV_ever and HFNO_ever flags
     print("Creating NIPPV_ever and HFNO_ever flags...")
@@ -788,7 +788,7 @@ def _(cohort_df, pd, resp_df):
         IMV_ever=('device_category_lower', lambda x: 1 if any('imv' in str(d) for d in x) else 0)
     ).reset_index()
 
-    print(f"✓ Respiratory support metrics calculated for {len(resp_summary):,} hospitalizations")
+    print(f"Respiratory support metrics calculated for {len(resp_summary):,} hospitalizations")
     print(f"\n=== Respiratory Support Usage ===")
     print(f"NIPPV usage:")
     print(f"  Hospitalizations with NIPPV: {(resp_summary['NIPPV_ever'] == 1).sum():,} ({(resp_summary['NIPPV_ever'] == 1).mean()*100:.1f}%)")
@@ -821,7 +821,7 @@ def _(cohort_complete, pd, resp_summary):
     cohort_with_resp['HFNO_ever'] = cohort_with_resp['HFNO_ever'].fillna(0).astype(int)
     cohort_with_resp['IMV_ever'] = cohort_with_resp['IMV_ever'].fillna(0).astype(int)
 
-    print(f"✓ Respiratory support metrics merged to cohort: {len(cohort_with_resp):,} hospitalizations")
+    print(f"Respiratory support metrics merged to cohort: {len(cohort_with_resp):,} hospitalizations")
     print(f"  Hospitalizations with NIPPV: {(cohort_with_resp['NIPPV_ever'] == 1).sum():,} ({(cohort_with_resp['NIPPV_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without NIPPV: {(cohort_with_resp['NIPPV_ever'] == 0).sum():,} ({(cohort_with_resp['NIPPV_ever'] == 0).mean()*100:.1f}%)")
     print(f"  Hospitalizations with HFNO: {(cohort_with_resp['HFNO_ever'] == 1).sum():,} ({(cohort_with_resp['HFNO_ever'] == 1).mean()*100:.1f}%)")
@@ -891,7 +891,7 @@ def _(CrrtTherapy, cohort_df):
     )
 
     crrt_df = crrt_table.df.copy()
-    print(f"✓ CRRT data loaded: {len(crrt_df):,} records")
+    print(f"CRRT data loaded: {len(crrt_df):,} records")
     return (crrt_df,)
 
 
@@ -917,7 +917,7 @@ def _(cohort_df, crrt_df, pd):
         (crrt_with_windows['recorded_dttm'] <= crrt_with_windows['end_dttm'])
     ].copy()
 
-    print(f"✓ CRRT filtered to ICU windows: {len(crrt_icu_window):,} records")
+    print(f"CRRT filtered to ICU windows: {len(crrt_icu_window):,} records")
 
     # Create crrt_ever flag
     print("Creating crrt_ever flag...")
@@ -926,7 +926,7 @@ def _(cohort_df, crrt_df, pd):
     crrt_summary = crrt_icu_window.groupby('hospitalization_id').size().reset_index(name='crrt_count')
     crrt_summary['crrt_ever'] = 1
 
-    print(f"✓ CRRT metrics calculated for {len(crrt_summary):,} hospitalizations")
+    print(f"CRRT metrics calculated for {len(crrt_summary):,} hospitalizations")
     print(f"\n=== CRRT Usage ===")
     print(f"Hospitalizations with CRRT: {len(crrt_summary):,}")
     return (crrt_summary,)
@@ -947,7 +947,7 @@ def _(cohort_final_with_resp, crrt_summary, pd):
     # Fill NaN (no CRRT) with 0
     cohort_with_crrt['crrt_ever'] = cohort_with_crrt['crrt_ever'].fillna(0).astype(int)
 
-    print(f"✓ CRRT metrics merged to cohort: {len(cohort_with_crrt):,} hospitalizations")
+    print(f"CRRT metrics merged to cohort: {len(cohort_with_crrt):,} hospitalizations")
     print(f"  Hospitalizations with CRRT: {(cohort_with_crrt['crrt_ever'] == 1).sum():,} ({(cohort_with_crrt['crrt_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without CRRT: {(cohort_with_crrt['crrt_ever'] == 0).sum():,} ({(cohort_with_crrt['crrt_ever'] == 0).mean()*100:.1f}%)")
 
@@ -1001,7 +1001,7 @@ def _(ClifOrchestrator):
     print("\n=== SOFA Score Computation ===")
     print("Initializing ClifOrchestrator for SOFA...")
     co_sofa = ClifOrchestrator(config_path='clif_config.json')
-    print("✓ ClifOrchestrator initialized for SOFA")
+    print("ClifOrchestrator initialized for SOFA")
     return (co_sofa,)
 
 
@@ -1025,7 +1025,7 @@ def _(cohort_final_with_crrt, pd):
         'end_time': sofa_end_time
     })
 
-    print(f"✓ SOFA cohort prepared: {len(sofa_cohort_df):,} hospitalizations (first 24h window)")
+    print(f"SOFA cohort prepared: {len(sofa_cohort_df):,} hospitalizations (first 24h window)")
     return (sofa_cohort_df,)
 
 
@@ -1036,7 +1036,7 @@ def _(cohort_final_with_crrt):
 
     sofa_cohort_ids = cohort_final_with_crrt['hospitalization_id'].astype(str).unique().tolist()
 
-    print(f"✓ Extracted {len(sofa_cohort_ids):,} hospitalization IDs")
+    print(f"Extracted {len(sofa_cohort_ids):,} hospitalization IDs")
     return (sofa_cohort_ids,)
 
 
@@ -1097,7 +1097,7 @@ def _(co_sofa, sofa_cohort_ids):
             columns=table_cols
         )
 
-    print("✓ All SOFA tables loaded with category filters")
+    print("All SOFA tables loaded with category filters")
     return
 
 
@@ -1119,7 +1119,7 @@ def _(co_sofa):
     final_count = len(med_df)
     co_sofa.medication_admin_continuous.df = med_df
 
-    print(f"✓ Medication data cleaned: {initial_count:,} → {final_count:,} records ({initial_count - final_count:,} removed)")
+    print(f"Medication data cleaned: {initial_count:,} → {final_count:,} records ({initial_count - final_count:,} removed)")
     return
 
 
@@ -1146,7 +1146,7 @@ def _(co_sofa):
     success_count = conversion_counts[conversion_counts['_convert_status'] == 'success']['count'].sum()
     total_count = conversion_counts['count'].sum()
 
-    print(f"✓ Unit conversion complete: {success_count:,} / {total_count:,} successful ({100*success_count/total_count:.1f}%)")
+    print(f"Unit conversion complete: {success_count:,} / {total_count:,} successful ({100*success_count/total_count:.1f}%)")
     return
 
 
@@ -1161,7 +1161,7 @@ def _(co_sofa, sofa_cohort_df):
     )
 
     # Show SOFA columns (inline to avoid variable conflicts)
-    print(f"✓ SOFA scores computed: {sofa_scores.shape}")
+    print(f"SOFA scores computed: {sofa_scores.shape}")
     print(f"  SOFA columns: {[col for col in sofa_scores.columns if 'sofa' in col.lower()]}")
     return (sofa_scores,)
 
@@ -1208,7 +1208,7 @@ def _(co_sofa, pd):
     # Keep only hospitalization_id and bmi for merging
     bmi_final = bmi_df[['hospitalization_id', 'bmi']].copy()
 
-    print(f"✓ BMI calculated for {bmi_final['bmi'].notna().sum():,} hospitalizations")
+    print(f"BMI calculated for {bmi_final['bmi'].notna().sum():,} hospitalizations")
     print(f"  Missing BMI: {bmi_final['bmi'].isna().sum():,}")
     if bmi_final['bmi'].notna().any():
         print(f"  Mean BMI: {bmi_final['bmi'].mean():.2f}")
@@ -1229,7 +1229,7 @@ def _(bmi_final, cohort_final_with_crrt, pd, sofa_scores):
     )
 
     # Print SOFA merge summary (inline to avoid variable conflicts)
-    print(f"✓ SOFA scores merged: {cohort_with_sofa_temp.shape}")
+    print(f"SOFA scores merged: {cohort_with_sofa_temp.shape}")
     print(f"  Total columns: {len(cohort_with_sofa_temp.columns)}")
     print(f"  SOFA columns added: {len([col for col in cohort_with_sofa_temp.columns if 'sofa' in col.lower()])}")
 
@@ -1242,7 +1242,7 @@ def _(bmi_final, cohort_final_with_crrt, pd, sofa_scores):
         how='left'
     )
 
-    print(f"✓ BMI merged to cohort: {len(cohort_with_sofa):,} hospitalizations")
+    print(f"BMI merged to cohort: {len(cohort_with_sofa):,} hospitalizations")
     print(f"  BMI available: {cohort_with_sofa['bmi'].notna().sum():,} ({cohort_with_sofa['bmi'].notna().mean()*100:.1f}%)")
     print(f"  BMI missing: {cohort_with_sofa['bmi'].isna().sum():,} ({cohort_with_sofa['bmi'].isna().mean()*100:.1f}%)")
     return (cohort_with_sofa,)
@@ -1303,13 +1303,13 @@ def _(cohort_with_sofa):
 
     print(f"\n=== Vital Signs (ICU Stay Window) ===")
     if 'highest_temperature' in cohort_with_sofa.columns:
-        print(f"Highest Temperature (°C):")
+        print(f"Highest Temperature (C):")
         print(f"  Mean: {cohort_with_sofa['highest_temperature'].mean():.2f}")
         print(f"  Median: {cohort_with_sofa['highest_temperature'].median():.2f}")
         print(f"  Missing: {cohort_with_sofa['highest_temperature'].isna().sum():,} ({cohort_with_sofa['highest_temperature'].isna().mean()*100:.1f}%)")
 
     if 'lowest_temperature' in cohort_with_sofa.columns:
-        print(f"Lowest Temperature (°C):")
+        print(f"Lowest Temperature (C):")
         print(f"  Mean: {cohort_with_sofa['lowest_temperature'].mean():.2f}")
         print(f"  Median: {cohort_with_sofa['lowest_temperature'].median():.2f}")
         print(f"  Missing: {cohort_with_sofa['lowest_temperature'].isna().sum():,} ({cohort_with_sofa['lowest_temperature'].isna().mean()*100:.1f}%)")
@@ -1322,7 +1322,7 @@ def _(cohort_with_sofa):
 
     print(f"\n=== Laboratory Values (ICU Stay Window) ===")
     if 'highest_wbc' in cohort_with_sofa.columns:
-        print(f"Highest WBC (10^3/μL):")
+        print(f"Highest WBC (10^3/uL):")
         print(f"  Mean: {cohort_with_sofa['highest_wbc'].mean():.2f}")
         print(f"  Median: {cohort_with_sofa['highest_wbc'].median():.2f}")
         print(f"  Missing: {cohort_with_sofa['highest_wbc'].isna().sum():,} ({cohort_with_sofa['highest_wbc'].isna().mean()*100:.1f}%)")

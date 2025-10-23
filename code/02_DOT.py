@@ -104,7 +104,7 @@ def _(Path, pd):
     cohort_df['start_dttm'] = cohort_df['start_dttm'].dt.tz_localize(None)
     cohort_df['end_dttm'] = cohort_df['end_dttm'].dt.tz_localize(None)
 
-    print(f"✓ Cohort loaded: {len(cohort_df):,} hospitalizations")
+    print(f"Cohort loaded: {len(cohort_df):,} hospitalizations")
     print(f"  Unique patients: {cohort_df['patient_id'].nunique():,}")
     print(f"  Date range: {cohort_df['start_dttm'].min()} to {cohort_df['start_dttm'].max()}")
     print(f"  Columns: {len(cohort_df.columns)}")
@@ -137,7 +137,7 @@ def _(HospitalDiagnosis, cohort_df):
         columns=['hospitalization_id', 'diagnosis_code', 'diagnosis_code_format']
     )
 
-    print(f"✓ Hospital diagnosis data loaded: {len(hosp_dx_table.df):,} records")
+    print(f"Hospital diagnosis data loaded: {len(hosp_dx_table.df):,} records")
     print(f"  Unique hospitalizations: {hosp_dx_table.df['hospitalization_id'].nunique():,}")
     print(f"  ICD10CM codes: {(hosp_dx_table.df['diagnosis_code_format'] == 'ICD10CM').sum():,}")
     return (hosp_dx_table,)
@@ -150,7 +150,7 @@ def _(calculate_elix, hosp_dx_table):
 
     elix_results = calculate_elix(hosp_dx_table, hierarchy=True)
 
-    print(f"\n✓ Elixhauser scores calculated: {len(elix_results):,} hospitalizations")
+    print(f"\nElixhauser scores calculated: {len(elix_results):,} hospitalizations")
     print(f"  Mean Elixhauser score: {elix_results['elix_score'].mean():.2f}")
     print(f"  Median Elixhauser score: {elix_results['elix_score'].median():.2f}")
     print(f"  Range: {elix_results['elix_score'].min():.0f} to {elix_results['elix_score'].max():.0f}")
@@ -164,7 +164,7 @@ def _(calculate_cci, hosp_dx_table):
 
     cci_results = calculate_cci(hosp_dx_table, hierarchy=True)
 
-    print(f"\n✓ CCI scores calculated: {len(cci_results):,} hospitalizations")
+    print(f"\nCCI scores calculated: {len(cci_results):,} hospitalizations")
     print(f"  Mean CCI score: {cci_results['cci_score'].mean():.2f}")
     print(f"  Median CCI score: {cci_results['cci_score'].median():.2f}")
     print(f"  Range: {cci_results['cci_score'].min():.0f} to {cci_results['cci_score'].max():.0f}")
@@ -226,7 +226,7 @@ def _(cci_results, cohort_df, elix_results, pd):
         cohort_with_comorbidity['chronic_pulmonary_disease'] = 0
         print("  Warning: No chronic pulmonary disease column found in comorbidity results")
 
-    print(f"✓ Comorbidity scores merged: {len(cohort_with_comorbidity):,} hospitalizations")
+    print(f"Comorbidity scores merged: {len(cohort_with_comorbidity):,} hospitalizations")
     print(f"  Elixhauser available: {cohort_with_comorbidity['elix_score'].notna().sum():,}")
     print(f"  CCI available: {cohort_with_comorbidity['cci_score'].notna().sum():,}")
     print(f"  Chronic pulmonary disease: {(cohort_with_comorbidity['chronic_pulmonary_disease'] == 1).sum():,} ({(cohort_with_comorbidity['chronic_pulmonary_disease'] == 1).mean()*100:.1f}%)")
@@ -258,7 +258,7 @@ def _(pd):
         'Score': 'spectrum_score'
     })
 
-    print(f"✓ Antibiotic spectrum scoring loaded: {len(abx_spectrum)} antibiotics")
+    print(f"Antibiotic spectrum scoring loaded: {len(abx_spectrum)} antibiotics")
     print(f"  Spectrum score range: {abx_spectrum['spectrum_score'].min()} - {abx_spectrum['spectrum_score'].max()}")
 
     # Extract antibiotic list for filtering medications
@@ -307,7 +307,7 @@ def _(MedicationAdminIntermittent, antibiotic_filter_list, cohort_ids):
     # Strip timezone info from datetime column (keep local time, remove timezone awareness)
     meds_intermittent_df['admin_dttm'] = meds_intermittent_df['admin_dttm'].dt.tz_localize(None)
 
-    print(f"✓ Medication administrations loaded: {len(meds_intermittent_df):,} records")
+    print(f"Medication administrations loaded: {len(meds_intermittent_df):,} records")
     print(f"  Unique patients: {meds_intermittent_df['hospitalization_id'].nunique():,}")
     print(f"  Unique antibiotics: {meds_intermittent_df['med_category'].nunique()}")
     print(f"  Date range: {meds_intermittent_df['admin_dttm'].min()} to {meds_intermittent_df['admin_dttm'].max()}")
@@ -340,7 +340,7 @@ def _(antibiotic_filter_list, meds_intermittent_df):
         for abx_name in sorted(antibiotics_not_found):
             print(f"  - {abx_name}")
     else:
-        print("\n✓ All antibiotics in CSV were found in medication data")
+        print("\nAll antibiotics in CSV were found in medication data")
     return
 
 
@@ -369,7 +369,7 @@ def _(cohort_with_comorbidity, meds_intermittent_df, pd):
         (meds_with_windows['admin_dttm'] <= meds_with_windows['end_dttm'])
     ].copy()
 
-    print(f"✓ Medications filtered to ICU windows: {len(meds_icu_window):,} records")
+    print(f"Medications filtered to ICU windows: {len(meds_icu_window):,} records")
     print(f"  Unique patients with antibiotics: {meds_icu_window['hospitalization_id'].nunique():,}")
     print(f"  Records removed (outside ICU window): {len(meds_with_windows) - len(meds_icu_window):,}")
     return (meds_icu_window,)
@@ -404,7 +404,7 @@ def _(cohort_with_comorbidity, meds_icu_window, pl):
     # Medications
     meds_pl = pl.DataFrame(meds_icu_window)
 
-    print(f"✓ Data prepared")
+    print(f"Data prepared")
     print(f"  Cohort shape: {cohort_pl.shape}")
     print(f"  Medications shape: {meds_pl.shape}")
     return cohort_pl, meds_pl
@@ -455,7 +455,7 @@ def _(cohort_pl, pl, timedelta, tqdm):
     # Create Polars DataFrame
     windows_pl = pl.DataFrame(window_data)
 
-    print(f"✓ Created {len(windows_pl):,} 24-hour windows")
+    print(f"Created {len(windows_pl):,} 24-hour windows")
     print(f"  Total hospitalizations: {windows_pl['hospitalization_id'].n_unique():,}")
     print(f"  Average windows per hospitalization: {len(windows_pl) / windows_pl['hospitalization_id'].n_unique():.1f}")
     print(f"  Total Patient-Days: {len(windows_pl):,}")
@@ -646,7 +646,7 @@ def _(abx_spectrum, cohort_with_comorbidity, meds_pl, pl, tqdm, windows_pl):
     # Create DOT DataFrame (long format)
     dot_long_pl = pl.DataFrame(dot_results)
 
-    print(f"\n✓ DOT calculation complete")
+    print(f"\nDOT calculation complete")
     print(f"  Total DOT records: {len(dot_long_pl):,}")
     print(f"  Unique hospitalizations with antibiotics: {dot_long_pl.filter(pl.col('antibiotic') != 'ANTIBIOTIC_FREE')['hospitalization_id'].n_unique():,}")
 
@@ -658,7 +658,7 @@ def _(abx_spectrum, cohort_with_comorbidity, meds_pl, pl, tqdm, windows_pl):
         .agg(pl.col('window_num').count().alias('PD'))
     )
 
-    print(f"✓ Patient-Days calculated for {len(pd_per_hosp):,} hospitalizations")
+    print(f"Patient-Days calculated for {len(pd_per_hosp):,} hospitalizations")
 
     # Pivot DOT data from long to wide format
     print("\nPivoting DOT data to wide format...")
@@ -692,7 +692,7 @@ def _(abx_spectrum, cohort_with_comorbidity, meds_pl, pl, tqdm, windows_pl):
         ] + [col for col in dot_hospital_level.columns if col not in ['patient_id', 'hospitalization_id', 'PD']])
     )
 
-    print(f"✓ Hospital-level table created")
+    print(f"Hospital-level table created")
     print(f"  Shape: {dot_hospital_level.shape}")
     print(f"  Columns: {len(dot_hospital_level.columns)} (patient_id, hospitalization_id, PD, + {len(dot_hospital_level.columns)-3} antibiotics)")
 
@@ -703,7 +703,7 @@ def _(abx_spectrum, cohort_with_comorbidity, meds_pl, pl, tqdm, windows_pl):
     # Create Polars DataFrame for daily ASC
     daily_asc_patient_level = pl.DataFrame(daily_asc_results)
 
-    print(f"\n✓ Daily ASC calculated")
+    print(f"\nDaily ASC calculated")
     print(f"  Total records: {len(daily_asc_patient_level):,}")
     print(f"  Unique hospitalizations: {daily_asc_patient_level['hospitalization_id'].n_unique():,}")
     return daily_asc_patient_level, dot_hospital_level
@@ -805,7 +805,7 @@ def _(abx_spectrum, dot_hospital_level, pl):
         .sort('dot_per_1000_pd', descending=True)
     )
 
-    print(f"\n✓ Antibiotic-level metrics calculated")
+    print(f"\nAntibiotic-level metrics calculated")
     print(f"  Total antibiotics: {len(dot_antibiotic_level)}")
     print(f"\n=== Top 10 Antibiotics by DOT per 1000 PD ===")
     print(dot_antibiotic_level.head(10).to_pandas().to_string(index=False))
@@ -893,7 +893,7 @@ def _(dot_hospital_level, pl):
         'value': [float(total_dot_cohort), float(total_pd_cohort), overall_dot_per_1000_pd_cohort]
     })
 
-    print(f"\n✓ Cohort-level metrics calculated")
+    print(f"\nCohort-level metrics calculated")
     return (dot_cohort_level,)
 
 
@@ -976,7 +976,7 @@ def _(daily_asc_patient_level, pl):
     print(f"\n=== Daily ASC Summary (ICU Days 0-10) ===")
     print(daily_asc_summary.to_pandas().to_string(index=False))
 
-    print(f"\n✓ Daily ASC summary calculated")
+    print(f"\nDaily ASC summary calculated")
     return (daily_asc_summary,)
 
 
@@ -1045,7 +1045,7 @@ def _(
         .agg(pl.col('daily_asc').sum().alias('DASC'))
     )
 
-    print(f"✓ DASC calculated for {len(dasc_per_hosp):,} hospitalizations")
+    print(f"DASC calculated for {len(dasc_per_hosp):,} hospitalizations")
 
     # Join with PD from dot_hospital_level
     dasc_with_pd = (
@@ -1109,7 +1109,7 @@ def _(
 
     print(dasc_by_year.to_pandas().to_string(index=False))
 
-    print(f"\n✓ DASC per 1000 PD calculated")
+    print(f"\nDASC per 1000 PD calculated")
     return dasc_by_year, dasc_overall
 
 
@@ -1181,7 +1181,7 @@ def _(dot_hospital_level, pl):
         )
     )
 
-    print(f"✓ AFD calculated for {len(afd_patient_level):,} hospitalizations")
+    print(f"AFD calculated for {len(afd_patient_level):,} hospitalizations")
 
     # Calculate summary statistics
     mean_afd_rate = afd_patient_level['afd_rate'].mean()
@@ -1234,7 +1234,7 @@ def _(dot_hospital_level, pl):
         ]
     })
 
-    print(f"\n✓ AFD summary calculated")
+    print(f"\nAFD summary calculated")
     return afd_patient_level, afd_summary
 
 
@@ -1297,7 +1297,7 @@ def _(daily_asc_patient_level, pl, windows_pl):
         )
     )
 
-    print(f"✓ Joined {len(asc_with_timestamps):,} records")
+    print(f"Joined {len(asc_with_timestamps):,} records")
 
     # Extract year from window_start
     print("\nExtracting year from window_start timestamps...")
@@ -1305,7 +1305,7 @@ def _(daily_asc_patient_level, pl, windows_pl):
         pl.col('window_start').dt.year().alias('year')
     )
 
-    print(f"✓ Year extracted")
+    print(f"Year extracted")
     print(f"  Year range: {asc_with_year['year'].min()} - {asc_with_year['year'].max()}")
 
     # Group by year and calculate summary statistics
@@ -1335,7 +1335,7 @@ def _(daily_asc_patient_level, pl, windows_pl):
     print(f"\n=== Year-Based ASC Summary ===")
     print(asc_by_year_summary.to_pandas().to_string(index=False))
 
-    print(f"\n✓ Year-based ASC summary calculated")
+    print(f"\nYear-based ASC summary calculated")
     print(f"  Years analyzed: {len(asc_by_year_summary)}")
     print(f"  Total windows: {asc_by_year_summary['n_windows'].sum():,}")
     print(f"\n📊 This data enables time series plotting of ASC trends over years 2018-2024")
@@ -1379,7 +1379,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site', 'hospitalization_id'] + [col for col in dot_hospital_level.columns if col != 'hospitalization_id'])
     dot_hospital_level_with_site.write_parquet(Path('PHI_DATA') / 'dot_hospital_level.parquet')
-    print(f"   ✓ Saved: PHI_DATA/dot_hospital_level.parquet")
+    print(f"   Saved: PHI_DATA/dot_hospital_level.parquet")
     print(f"   Shape: {dot_hospital_level_with_site.shape}")
 
     # Save daily ASC patient-level data
@@ -1388,7 +1388,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in daily_asc_patient_level.columns])
     daily_asc_patient_level_with_site.write_parquet(Path('PHI_DATA') / 'daily_asc_patient_level.parquet')
-    print(f"   ✓ Saved: PHI_DATA/daily_asc_patient_level.parquet")
+    print(f"   Saved: PHI_DATA/daily_asc_patient_level.parquet")
     print(f"   Shape: {daily_asc_patient_level_with_site.shape}")
 
     # Save AFD patient-level data
@@ -1397,7 +1397,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in afd_patient_level.columns])
     afd_patient_level_with_site.write_parquet(Path('PHI_DATA') / 'afd_patient_level.parquet')
-    print(f"   ✓ Saved: PHI_DATA/afd_patient_level.parquet")
+    print(f"   Saved: PHI_DATA/afd_patient_level.parquet")
     print(f"   Shape: {afd_patient_level_with_site.shape}")
 
     print("\n=== SUMMARY DATA (Safe to Share - Upload These Files) ===")
@@ -1408,7 +1408,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in dot_antibiotic_level.columns])
     dot_antibiotic_level_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_antibiotic_level.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_antibiotic_level.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/dot_antibiotic_level.csv")
     print(f"   Shape: {dot_antibiotic_level_with_site.shape}")
 
     # Save cohort-level overall metrics
@@ -1417,7 +1417,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in dot_cohort_level.columns])
     dot_cohort_level_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_cohort_level.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_cohort_level.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/dot_cohort_level.csv")
     print(f"   Shape: {dot_cohort_level_with_site.shape}")
 
     # REMOVED: Location-type-level metrics not needed for MICU-only cohort
@@ -1427,7 +1427,7 @@ def _(
     #     pl.lit(site_name).alias('site')
     # ).select(['site'] + [col for col in dot_location_type_level.columns])
     # dot_location_type_level_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dot_location_type_level.csv')
-    # print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dot_location_type_level.csv")
+    # print(f"   Saved: RESULTS_UPLOAD_ME/dot_location_type_level.csv")
     # print(f"   Shape: {dot_location_type_level_with_site.shape}")
 
     # Save daily ASC summary (for sharing)
@@ -1436,7 +1436,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in daily_asc_summary.columns])
     daily_asc_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'daily_asc_summary.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/daily_asc_summary.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/daily_asc_summary.csv")
     print(f"   Shape: {daily_asc_summary_with_site.shape}")
 
     # Save DASC overall metrics
@@ -1445,7 +1445,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in dasc_overall.columns])
     dasc_overall_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_overall.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dasc_overall.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/dasc_overall.csv")
     print(f"   Shape: {dasc_overall_with_site.shape}")
 
     # Save DASC by year metrics
@@ -1454,7 +1454,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in dasc_by_year.columns])
     dasc_by_year_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'dasc_by_year.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/dasc_by_year.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/dasc_by_year.csv")
     print(f"   Shape: {dasc_by_year_with_site.shape}")
 
     # Save AFD summary (for sharing)
@@ -1463,7 +1463,7 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in afd_summary.columns])
     afd_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'afd_summary.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/afd_summary.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/afd_summary.csv")
     print(f"   Shape: {afd_summary_with_site.shape}")
 
     # Save year-based ASC summary (for time series plotting)
@@ -1472,10 +1472,10 @@ def _(
         pl.lit(site_name).alias('site')
     ).select(['site'] + [col for col in asc_by_year_summary.columns])
     asc_by_year_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_summary.csv')
-    print(f"   ✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_summary.csv")
+    print(f"   Saved: RESULTS_UPLOAD_ME/asc_by_year_summary.csv")
     print(f"   Shape: {asc_by_year_summary_with_site.shape}")
 
-    print(f"\n✓ All results saved successfully!")
+    print(f"\nAll results saved successfully!")
     print(f"\n{'='*80}")
     return
 
@@ -1567,7 +1567,7 @@ def _(Path, asc_by_year_summary, np, plt, scipy):
 
     # Save
     plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_plot.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_year_plot.png")
+    print(f"Saved: RESULTS_UPLOAD_ME/asc_by_year_plot.png")
 
     plt.close()
     return
@@ -1650,7 +1650,7 @@ def _(Path, daily_asc_summary, np, plt, scipy):
 
     # Save
     plt.savefig(Path('RESULTS_UPLOAD_ME') / 'asc_by_window_plot.png', dpi=300, bbox_inches='tight')
-    print(f"✓ Saved: RESULTS_UPLOAD_ME/asc_by_window_plot.png")
+    print(f"Saved: RESULTS_UPLOAD_ME/asc_by_window_plot.png")
 
     plt.close()
     return
@@ -2071,7 +2071,7 @@ def _(
     with open(t1_json_path, 'w') as json_file:
         json.dump(t1_table1_data, json_file, indent=2)
 
-    print(f"\n✓ Saved JSON: {t1_json_path}")
+    print(f"\nSaved JSON: {t1_json_path}")
 
     # ============================================================
     # BUILD TABLE 1 AS CSV (for viewing)
@@ -2225,12 +2225,12 @@ def _(
     t1_csv_path = Path('RESULTS_UPLOAD_ME') / 'table1_summary.csv'
     t1_table1_df.write_csv(t1_csv_path)
 
-    print(f"✓ Saved CSV: {t1_csv_path}")
+    print(f"Saved CSV: {t1_csv_path}")
     print(f"\n=== Table 1 Summary ===")
     print(f"Total patients: {t1_total_patients:,}")
     print(f"Total patient-days: {int(t1_total_patient_days):,}")
     print(f"Top antibiotic: {t1_top_antibiotics['antibiotic'][0]} (DOT per 1000 PD: {t1_top_antibiotics['dot_per_1000_pd'][0]:.2f})")
-    print(f"\n✓ Table 1 generation complete!")
+    print(f"\nTable 1 generation complete!")
     return
 
 
