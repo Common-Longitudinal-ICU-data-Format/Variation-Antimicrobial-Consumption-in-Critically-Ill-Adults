@@ -1740,8 +1740,8 @@ def _(
     imv_n_missing = cohort_pl_t1['IMV_ever'].is_null().sum() if 'IMV_ever' in cohort_pl_t1.columns else t1_total_patients
     imv_pct_missing = (imv_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
 
-    cvvh_n_missing = t1_total_patients  # Not available yet
-    cvvh_pct_missing = 100.0
+    crrt_n_missing = cohort_pl_t1['crrt_ever'].is_null().sum() if 'crrt_ever' in cohort_pl_t1.columns else t1_total_patients
+    crrt_pct_missing = (crrt_n_missing / t1_total_patients * 100) if t1_total_patients > 0 else 0
 
     # Labs
     wbc_n_missing = cohort_pl_t1['highest_wbc'].is_null().sum() if 'highest_wbc' in cohort_pl_t1.columns else t1_total_patients
@@ -1842,6 +1842,9 @@ def _(
     t1_imv_ever_n = cohort_pl_t1['IMV_ever'].sum()
     t1_imv_ever_pct = (t1_imv_ever_n / t1_total_patients * 100)
 
+    t1_crrt_ever_n = cohort_pl_t1['crrt_ever'].sum() if 'crrt_ever' in cohort_pl_t1.columns else 0
+    t1_crrt_ever_pct = (t1_crrt_ever_n / t1_total_patients * 100) if t1_total_patients > 0 else 0
+
     # Labs
     t1_mean_highest_wbc = cohort_pl_t1['highest_wbc'].mean()
     t1_sd_highest_wbc = cohort_pl_t1['highest_wbc'].std()
@@ -1936,8 +1939,10 @@ def _(
             "nippv_ever_pct": float(t1_nippv_ever_pct),
             "hfno_ever_n": int(t1_hfno_ever_n),
             "hfno_ever_pct": float(t1_hfno_ever_pct),
-            "cvvh_n": "NOT_AVAILABLE",
-            "cvvh_pct": "NOT_AVAILABLE",
+            "imv_ever_n": int(t1_imv_ever_n),
+            "imv_ever_pct": float(t1_imv_ever_pct),
+            "crrt_ever_n": int(t1_crrt_ever_n),
+            "crrt_ever_pct": float(t1_crrt_ever_pct),
             "highest_wbc_mean": float(t1_mean_highest_wbc),
             "highest_wbc_sd": float(t1_sd_highest_wbc),
             "highest_creatinine_mean": float(t1_mean_highest_cr),
@@ -2027,9 +2032,9 @@ def _(
                 "n_missing": int(imv_n_missing),
                 "pct_missing": float(imv_pct_missing)
             },
-            "cvvh": {
-                "n_missing": int(cvvh_n_missing),
-                "pct_missing": float(cvvh_pct_missing)
+            "crrt_ever": {
+                "n_missing": int(crrt_n_missing),
+                "pct_missing": float(crrt_pct_missing)
             },
             "highest_wbc": {
                 "n_missing": int(wbc_n_missing),
@@ -2154,8 +2159,8 @@ def _(
                        'Value': f"{t1_hfno_ever_n} ({t1_hfno_ever_pct:.1f}%)", 'n_missing': str(hfno_n_missing), 'Notes': ''})
     t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'IMV_ever (n, %)',
                        'Value': f"{t1_imv_ever_n} ({t1_imv_ever_pct:.1f}%)", 'n_missing': str(imv_n_missing), 'Notes': ''})
-    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'CVVH (non missing and > 0 blood_flow) (n, %)',
-                       'Value': 'NOT AVAILABLE', 'n_missing': str(cvvh_n_missing), 'Notes': ''})
+    t1_table1_rows.append({'Category': 'Interventions', 'Variable': 'CRRT_ever (n, %)',
+                       'Value': f"{t1_crrt_ever_n} ({t1_crrt_ever_pct:.1f}%)", 'n_missing': str(crrt_n_missing), 'Notes': ''})
 
     t1_table1_rows.append({'Category': 'Labs', 'Variable': 'Highest WBC (mean, sd)',
                        'Value': f"{t1_mean_highest_wbc:.1f} ± {t1_sd_highest_wbc:.1f}", 'n_missing': str(wbc_n_missing), 'Notes': ''})

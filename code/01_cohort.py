@@ -14,8 +14,6 @@ def _():
 def _(mo):
     mo.md(
         r"""
-    # FLAME-ICU: Cohort Generation
-
     This notebook generates the ICU cohort for antimicrobial consumption analysis.
 
     ## Objective
@@ -78,7 +76,7 @@ def _(mo):
 def _():
     import pandas as pd
     import numpy as np
-    from clifpy.tables import Adt, Hospitalization, Patient, MedicationAdminContinuous, Labs, Vitals, RespiratorySupport
+    from clifpy.tables import Adt, Hospitalization, Patient, MedicationAdminContinuous, Labs, Vitals, RespiratorySupport, CrrtTherapy
     from clifpy.clif_orchestrator import ClifOrchestrator
     from clifpy.utils.outlier_handler import apply_outlier_handling
     import warnings
@@ -89,6 +87,7 @@ def _():
     return (
         Adt,
         ClifOrchestrator,
+        CrrtTherapy,
         Hospitalization,
         Labs,
         MedicationAdminContinuous,
@@ -186,7 +185,6 @@ def _(icu_data, pd):
         first_icu['location_type'] == 'medical_icu'
     ].copy()
     print(f"✓ Medical ICU only: {len(first_icu):,} hospitalizations")
-
     return (first_icu,)
 
 
@@ -870,6 +868,129 @@ def _(cohort_complete, pd, resp_summary):
 
 @app.cell
 def _(mo):
+    mo.md(r"""## Load and Process CRRT (Continuous Renal Replacement Therapy)""")
+    return
+
+
+@app.cell
+def _(CrrtTherapy, cohort_df):
+    # Load CRRT data
+    print("Loading CRRT data using clifpy...")
+
+    # Extract cohort hospitalization IDs
+    cohort_hosp_ids_crrt = cohort_df['hospitalization_id'].astype(str).unique().tolist()
+    print(f"Loading CRRT for {len(cohort_hosp_ids_crrt):,} hospitalizations")
+
+    # Load CRRT table with hospitalization_id filter
+    crrt_table = CrrtTherapy.from_file(
+        config_path='clif_config.json',
+        filters={
+            'hospitalization_id': cohort_hosp_ids_crrt
+        },
+        columns=['hospitalization_id', 'recorded_dttm']
+    )
+
+    crrt_df = crrt_table.df.copy()
+    print(f"✓ CRRT data loaded: {len(crrt_df):,} records")
+    return (crrt_df,)
+
+
+@app.cell
+def _(cohort_df, crrt_df, pd):
+    # Filter CRRT to ICU stay windows and create crrt_ever flag
+    print("Filtering CRRT to ICU stay windows...")
+
+    # Merge CRRT with cohort to get ICU stay windows
+    crrt_with_windows = pd.merge(
+        crrt_df,
+        cohort_df[['hospitalization_id', 'start_dttm', 'end_dttm']],
+        on='hospitalization_id',
+        how='inner'
+    )
+
+    # Convert datetime column
+    crrt_with_windows['recorded_dttm'] = pd.to_datetime(crrt_with_windows['recorded_dttm'])
+
+    # Filter CRRT to ICU stay window (start_dttm <= recorded_dttm <= end_dttm)
+    crrt_icu_window = crrt_with_windows[
+        (crrt_with_windows['recorded_dttm'] >= crrt_with_windows['start_dttm']) &
+        (crrt_with_windows['recorded_dttm'] <= crrt_with_windows['end_dttm'])
+    ].copy()
+
+    print(f"✓ CRRT filtered to ICU windows: {len(crrt_icu_window):,} records")
+
+    # Create crrt_ever flag
+    print("Creating crrt_ever flag...")
+
+    # Group by hospitalization_id and create binary flag
+    crrt_summary = crrt_icu_window.groupby('hospitalization_id').size().reset_index(name='crrt_count')
+    crrt_summary['crrt_ever'] = 1
+
+    print(f"✓ CRRT metrics calculated for {len(crrt_summary):,} hospitalizations")
+    print(f"\n=== CRRT Usage ===")
+    print(f"Hospitalizations with CRRT: {len(crrt_summary):,}")
+    return (crrt_summary,)
+
+
+@app.cell
+def _(cohort_final_with_resp, crrt_summary, pd):
+    # Merge CRRT metrics to cohort
+    print("Merging CRRT metrics to cohort...")
+
+    cohort_with_crrt = pd.merge(
+        cohort_final_with_resp,
+        crrt_summary[['hospitalization_id', 'crrt_ever']],
+        on='hospitalization_id',
+        how='left'
+    )
+
+    # Fill NaN (no CRRT) with 0
+    cohort_with_crrt['crrt_ever'] = cohort_with_crrt['crrt_ever'].fillna(0).astype(int)
+
+    print(f"✓ CRRT metrics merged to cohort: {len(cohort_with_crrt):,} hospitalizations")
+    print(f"  Hospitalizations with CRRT: {(cohort_with_crrt['crrt_ever'] == 1).sum():,} ({(cohort_with_crrt['crrt_ever'] == 1).mean()*100:.1f}%)")
+    print(f"  Hospitalizations without CRRT: {(cohort_with_crrt['crrt_ever'] == 0).sum():,} ({(cohort_with_crrt['crrt_ever'] == 0).mean()*100:.1f}%)")
+
+    # Reorder columns with CRRT column included
+    final_column_order_with_crrt = [
+        'patient_id',
+        'hospitalization_id',
+        'age_at_admission',
+        'admission_dttm', 'discharge_dttm','discharge_category',
+        'start_dttm',
+        'end_dttm',
+        'hospital_los_days',
+        'icu_los_days',
+        'inpatient_mortality',
+        'icu_mortality',
+        'highest_temperature',
+        'lowest_temperature',
+        'lowest_map',
+        'highest_wbc',
+        'highest_creatinine',
+        'NIPPV_ever',
+        'HFNO_ever',
+        'IMV_ever',
+        'crrt_ever',
+        'vasopressor_ever',
+        'no_of_vasopressor',
+        'location_type',
+        'sex_category',
+        'ethnicity_category',
+        'race_category',
+        'race_ethnicity',
+        'language_category'
+    ]
+
+    # Only select columns that exist
+    cohort_final_with_crrt = cohort_with_crrt[[col for col in final_column_order_with_crrt if col in cohort_with_crrt.columns]]
+
+    # Return complete cohort with all features including CRRT
+    return (cohort_final_with_crrt,)
+
+
+@app.cell
+def _(mo):
     mo.md(r"""## Compute SOFA Scores""")
     return
 
@@ -885,7 +1006,7 @@ def _(ClifOrchestrator):
 
 
 @app.cell
-def _(cohort_final_with_resp, pd):
+def _(cohort_final_with_crrt, pd):
     # Prepare cohort for SOFA computation (first 24 hours of ICU stay only)
     print("Preparing cohort for SOFA score computation (first 24 hours)...")
 
@@ -893,14 +1014,14 @@ def _(cohort_final_with_resp, pd):
     sofa_end_time = pd.Series([
         min(start + pd.Timedelta(hours=24), end)
         for start, end in zip(
-            cohort_final_with_resp['start_dttm'],
-            cohort_final_with_resp['end_dttm']
+            cohort_final_with_crrt['start_dttm'],
+            cohort_final_with_crrt['end_dttm']
         )
     ])
 
     sofa_cohort_df = pd.DataFrame({
-        'hospitalization_id': cohort_final_with_resp['hospitalization_id'],
-        'start_time': cohort_final_with_resp['start_dttm'],
+        'hospitalization_id': cohort_final_with_crrt['hospitalization_id'],
+        'start_time': cohort_final_with_crrt['start_dttm'],
         'end_time': sofa_end_time
     })
 
@@ -909,11 +1030,11 @@ def _(cohort_final_with_resp, pd):
 
 
 @app.cell
-def _(cohort_final_with_resp):
+def _(cohort_final_with_crrt):
     # Extract hospitalization IDs for SOFA table filtering
     print("Extracting hospitalization IDs for SOFA data filtering...")
 
-    sofa_cohort_ids = cohort_final_with_resp['hospitalization_id'].astype(str).unique().tolist()
+    sofa_cohort_ids = cohort_final_with_crrt['hospitalization_id'].astype(str).unique().tolist()
 
     print(f"✓ Extracted {len(sofa_cohort_ids):,} hospitalization IDs")
     return (sofa_cohort_ids,)
@@ -1092,17 +1213,16 @@ def _(co_sofa, pd):
     if bmi_final['bmi'].notna().any():
         print(f"  Mean BMI: {bmi_final['bmi'].mean():.2f}")
         print(f"  Median BMI: {bmi_final['bmi'].median():.2f}")
-
     return (bmi_final,)
 
 
 @app.cell
-def _(bmi_final, cohort_final_with_resp, pd, sofa_scores):
+def _(bmi_final, cohort_final_with_crrt, pd, sofa_scores):
     # Merge SOFA scores and BMI with cohort
     print("Merging SOFA scores with cohort...")
 
     cohort_with_sofa_temp = pd.merge(
-        cohort_final_with_resp,
+        cohort_final_with_crrt,
         sofa_scores,
         on='hospitalization_id',
         how='left'
@@ -1125,7 +1245,6 @@ def _(bmi_final, cohort_final_with_resp, pd, sofa_scores):
     print(f"✓ BMI merged to cohort: {len(cohort_with_sofa):,} hospitalizations")
     print(f"  BMI available: {cohort_with_sofa['bmi'].notna().sum():,} ({cohort_with_sofa['bmi'].notna().mean()*100:.1f}%)")
     print(f"  BMI missing: {cohort_with_sofa['bmi'].isna().sum():,} ({cohort_with_sofa['bmi'].isna().mean()*100:.1f}%)")
-
     return (cohort_with_sofa,)
 
 
@@ -1226,6 +1345,10 @@ def _(cohort_with_sofa):
     if 'IMV_ever' in cohort_with_sofa.columns:
         print(f"\nHospitalizations with IMV: {(cohort_with_sofa['IMV_ever'] == 1).sum():,} ({(cohort_with_sofa['IMV_ever'] == 1).mean()*100:.1f}%)")
         print(f"Hospitalizations without IMV: {(cohort_with_sofa['IMV_ever'] == 0).sum():,} ({(cohort_with_sofa['IMV_ever'] == 0).mean()*100:.1f}%)")
+
+    if 'crrt_ever' in cohort_with_sofa.columns:
+        print(f"\nHospitalizations with CRRT: {(cohort_with_sofa['crrt_ever'] == 1).sum():,} ({(cohort_with_sofa['crrt_ever'] == 1).mean()*100:.1f}%)")
+        print(f"Hospitalizations without CRRT: {(cohort_with_sofa['crrt_ever'] == 0).sum():,} ({(cohort_with_sofa['crrt_ever'] == 0).mean()*100:.1f}%)")
 
     print(f"\n=== Vasopressor Usage (ICU Stay Window) ===")
     if 'vasopressor_ever' in cohort_with_sofa.columns:
