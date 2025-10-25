@@ -264,46 +264,16 @@ Generate comprehensive summary statistics table including:
 
 This step creates the ICU cohort with all clinical features and SOFA scores.
 
-**Mac/Linux (with logging)**:
-
 ``` bash
-mkdir -p logs
-uv run marimo run code/01_cohort.py 2>&1 | tee logs/01_cohort_output.log
-```
-
-**Windows PowerShell (with logging)**:
-
-``` powershell
-New-Item -ItemType Directory -Force -Path logs
-uv run marimo run code/01_cohort.py 2>&1 | Tee-Object -FilePath logs/01_cohort_output.log
-```
-
-**Troubleshooting**: If you encounter errors, run in edit mode to see cell-level execution:
-
-``` bash
-uv run marimo edit code/01_cohort.py
+uv run code/01_cohort.py
 ```
 
 ### Step 2: Calculate DOT and Antibiotic Metrics
 
 This step performs all DOT, ASC, DASC, and AFD calculations, generates visualizations, and creates Table 1.
 
-**Mac/Linux (with logging)**:
-
 ``` bash
-uv run marimo run code/02_DOT.py 2>&1 | tee logs/02_DOT_output.log
-```
-
-**Windows PowerShell (with logging)**:
-
-``` powershell
-uv run marimo run code/02_DOT.py 2>&1 | Tee-Object -FilePath logs/02_DOT_output.log
-```
-
-**Troubleshooting**:
-
-``` bash
-uv run marimo edit code/02_DOT.py
+uv run code/02_DOT.py
 ```
 
 ## Output Files
