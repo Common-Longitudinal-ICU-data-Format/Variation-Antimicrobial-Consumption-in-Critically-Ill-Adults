@@ -40,9 +40,27 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 uv sync
 ```
 
-### 3. Configure Site
+### 3. Run the Pipeline
 
-Create/update `clif_config.json` (rename \_template.json) with your site-specific configuration:
+#### Step 1: Generate ICU Cohort
+
+This step creates the ICU cohort with all clinical features and SOFA scores.
+
+``` bash
+uv run marimo edit code/01_cohort.py
+```
+
+#### Step 2: Calculate DOT and Antibiotic Metrics
+
+This step performs all DOT, ASC, DASC, and AFD calculations, generates visualizations, and creates Table 1.
+
+``` bash
+uv run marimo edit code/02_DOT.py
+```
+
+### 4. Configure Site
+
+Rename `clif_config_template.json` to `clif_config.json` and update it with your site-specific configuration:
 
 ``` json
 {
@@ -53,7 +71,7 @@ Create/update `clif_config.json` (rename \_template.json) with your site-specifi
 }
 ```
 
-### 4. Prepare Reference Files
+### 5. Prepare Reference Files
 
 This file contains: - `Antibiotic`: Antibiotic names matching CLIF `med_category` values - `Score`: Spectrum coverage scores for each antibiotic
 
@@ -257,24 +275,6 @@ Generate comprehensive summary statistics table including:
 | Days of Antibiotic Spectrum Coverage | DASC | Sum of daily ASC values across all ICU windows for a hospitalization |
 | Antibiotic-Free Days | AFD | Number of 24-hour windows without any antibiotic administration |
 | SOFA Score | SOFA | Sequential Organ Failure Assessment score (computed via clifpy ClifOrchestrator) |
-
-## Execution Guide
-
-### Step 1: Generate ICU Cohort
-
-This step creates the ICU cohort with all clinical features and SOFA scores.
-
-``` bash
-uv run code/01_cohort.py
-```
-
-### Step 2: Calculate DOT and Antibiotic Metrics
-
-This step performs all DOT, ASC, DASC, and AFD calculations, generates visualizations, and creates Table 1.
-
-``` bash
-uv run code/02_DOT.py
-```
 
 ## Output Files
 
