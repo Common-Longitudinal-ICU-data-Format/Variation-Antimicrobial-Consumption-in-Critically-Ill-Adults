@@ -123,7 +123,7 @@ wheels = [
 
 [[package]]
 name = "clifpy"
-version = "0.2.6"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "build" },
@@ -141,9 +141,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "twine" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/76/24/661477d156852e2c769b82c67bc4c3c956b60702f3149ce8b8c713ba4178/clifpy-0.2.6.tar.gz", hash = "sha256:4f504fc8b4de28db980bc4a6c07be4bd94cbe3383c2d543ef71b983e34a73f01", size = 1254324, upload-time = "2025-10-20T19:50:57.25Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/1a/458f5efe537df020430f3766707e1ec0750ef5ac1795279ee7a785aee078/clifpy-0.3.0.tar.gz", hash = "sha256:ad9bb8a896a9f2343cbcd45c1a385d0b350d5c71b18c637fa5b4ad2ba814b5cd", size = 1261969, upload-time = "2025-10-28T15:04:26.114Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/af/96b26b079283452be107c026dc1ae50e101310b488b86db05a3716d978ec/clifpy-0.2.6-py3-none-any.whl", hash = "sha256:01d016373551960e029e43836379d0b37e6ec7ccff48008dccf019b048708c3c", size = 1283062, upload-time = "2025-10-20T19:50:56.002Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/f8/cd89cad4909fd317212e09349d5bb6a866e846a6701cc442068028058b2e/clifpy-0.3.0-py3-none-any.whl", hash = "sha256:533f4b0202cd0a26d7bb7f3a14b4c08025f5939df114b590110706abeb753300", size = 1292090, upload-time = "2025-10-28T15:04:19.419Z" },
 ]
 
 [[package]]
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "clifpy", specifier = ">=0.2.0" },
+    { name = "clifpy", specifier = ">=0.3.0" },
     { name = "marimo", specifier = ">=0.16.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pandas", specifier = ">=2.0.0" },
