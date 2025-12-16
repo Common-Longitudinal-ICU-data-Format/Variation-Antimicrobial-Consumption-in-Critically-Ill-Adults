@@ -28,12 +28,18 @@ def _(mo):
     - Respiratory support: `NIPPV_ever`, `HFNO_ever` (device usage during ICU stay)
     - Medications: `vasopressor_ever`, `no_of_vasopressor` (vasopressor usage during ICU stay)
 
-    ## Cohort Criteria
+    ## Inclusion Criteria
     - Adults (≥18 years)
-    - First ICU admission (`location_category == 'icu'`)
+    - First ICU admission (`location_category == 'icu'`) - ALL ICU types
     - Years: 2018-2024
-    - First ICU stay only
-    - ICU LOS > 6 hours (0.25 days)
+    - Admitted to ICU via the ED
+    - Admitted to academic or community hospital (excluding LTACH)
+
+    ## Exclusion Criteria
+    - Prior hospitalization within 48 hours (ED admission within 48h of prior discharge)
+    - Immunocompromised hosts (neutrophils_absolute < 500 at any timepoint)
+    - Hospital LOS < 96 hours (4 days)
+    - Died within 6 hours of ICU arrival
 
     ## Clinical Features Processing
     All features are filtered to ICU stay window (start_dttm to end_dttm):
@@ -76,7 +82,13 @@ def _(mo):
 def _():
     import pandas as pd
     import numpy as np
-    from clifpy.tables import Adt, Hospitalization, Patient, MedicationAdminContinuous, Labs, Vitals, RespiratorySupport, CrrtTherapy
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.patches import FancyBboxPatch
+    import json
+    import os
+    from pathlib import Path
+    from clifpy.tables import Adt, Hospitalization, Patient, MedicationAdminContinuous, Labs, Vitals, RespiratorySupport, CrrtTherapy, MicrobiologyNonculture, HospitalDiagnosis
     from clifpy.clif_orchestrator import ClifOrchestrator
     from clifpy.utils.outlier_handler import apply_outlier_handling
     import warnings
@@ -88,14 +100,20 @@ def _():
         Adt,
         ClifOrchestrator,
         CrrtTherapy,
+        HospitalDiagnosis,
         Hospitalization,
         Labs,
         MedicationAdminContinuous,
+        MicrobiologyNonculture,
+        Path,
         Patient,
         RespiratorySupport,
         Vitals,
         apply_outlier_handling,
+        json,
+        os,
         pd,
+        plt,
     )
 
 
@@ -110,7 +128,7 @@ def _(Adt, Hospitalization, Patient):
     # Load required tables using clifpy config file
     print("Loading required tables...")
 
-    # Load ADT data
+    # Load ADT data (include hospital_type and hospital_id for new criteria)
     adt_table = Adt.from_file(config_path='clif_config.json')
     adt_df = adt_table.df.copy()
     print(f"ADT data loaded: {len(adt_df):,} records")
@@ -128,8 +146,39 @@ def _(Adt, Hospitalization, Patient):
 
 
 @app.cell
+def _(HospitalDiagnosis):
+    # Load hospital diagnosis data for ESRD identification
+    hosp_dx_table = HospitalDiagnosis.from_file(config_path='clif_config.json')
+    hosp_dx_df = hosp_dx_table.df.copy()
+    print(f"Hospital diagnosis data loaded: {len(hosp_dx_df):,} records")
+    return (hosp_dx_df,)
+
+
+@app.cell
 def _(mo):
-    mo.md(r"""## Filter First ICU Stays""")
+    mo.md(r"""## Initialize CONSORT Tracking""")
+    return
+
+
+@app.cell
+def _(hosp_df):
+    # Initialize CONSORT flowchart tracking dictionary
+    consort_counts = {}
+
+    # Initial count: total hospitalizations
+    initial_hosp_count = hosp_df['hospitalization_id'].nunique()
+    consort_counts['initial'] = {
+        'description': 'Total hospitalizations',
+        'n': initial_hosp_count
+    }
+    print(f"=== CONSORT Tracking Initialized ===")
+    print(f"Initial hospitalizations: {initial_hosp_count:,}")
+    return (consort_counts,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Apply Inclusion Criteria""")
     return
 
 
@@ -138,9 +187,16 @@ def _(adt_df, hosp_df, pd):
     # Merge ADT with hospitalization data
     print("Merging ADT with hospitalization data...")
 
+    # Select ADT columns including hospital_type and hospital_id if available
+    adt_cols = ['hospitalization_id', 'location_category', 'location_type', 'in_dttm', 'out_dttm']
+    if 'hospital_type' in adt_df.columns:
+        adt_cols.append('hospital_type')
+    if 'hospital_id' in adt_df.columns:
+        adt_cols.append('hospital_id')
+
     icu_data = pd.merge(
-        adt_df[['hospitalization_id', 'location_category', 'location_type', 'in_dttm', 'out_dttm']],
-        hosp_df[['patient_id', 'hospitalization_id', 'age_at_admission', 'admission_dttm', 'discharge_dttm','discharge_category']],
+        adt_df[adt_cols],
+        hosp_df[['patient_id', 'hospitalization_id', 'age_at_admission', 'admission_dttm', 'discharge_dttm', 'discharge_category']],
         on='hospitalization_id',
         how='inner'
     )
@@ -149,23 +205,21 @@ def _(adt_df, hosp_df, pd):
     icu_data['location_category'] = icu_data['location_category'].str.lower()
 
     print(f"Merged data: {len(icu_data):,} records")
-    return (icu_data,)
-
-
-@app.cell
-def _(icu_data, pd):
-    # Apply cohort filters
-    print("Applying cohort filters...")
 
     # Convert datetime columns
     datetime_cols = ['in_dttm', 'out_dttm', 'admission_dttm', 'discharge_dttm']
     for col in datetime_cols:
         icu_data[col] = pd.to_datetime(icu_data[col])
+    return (icu_data,)
 
-    # Filter for ICU admissions (2018-2024, adults ≥18)
-    # Exclude records where ICU discharge is in 2025
+
+@app.cell
+def _(consort_counts, icu_data):
+    # INCLUSION: Year filter (2018-2024) and Adult filter (age >= 18)
+    print("\n=== Applying Inclusion Criteria ===")
+
+    # Filter for admissions 2018-2024, adults >= 18
     icu_filtered = icu_data[
-        (icu_data['location_category'] == 'icu') &
         (icu_data['admission_dttm'].dt.year >= 2018) &
         (icu_data['admission_dttm'].dt.year <= 2024) &
         (icu_data['out_dttm'].dt.year <= 2024) &
@@ -173,19 +227,570 @@ def _(icu_data, pd):
         (icu_data['age_at_admission'].notna())
     ].copy()
 
-    print(f"ICU admissions (2018-2024, adults, ICU discharge ≤2024): {len(icu_filtered):,} records")
+    n_year_adult = icu_filtered['hospitalization_id'].nunique()
+    consort_counts['year_adult'] = {
+        'description': 'Adults (≥18), Years 2018-2024',
+        'n': n_year_adult
+    }
+    print(f"After year (2018-2024) and adult (≥18) filter: {n_year_adult:,} hospitalizations")
+    return (icu_filtered,)
 
-    # Get first ICU stay per hospitalization
-    first_icu = icu_filtered.sort_values('in_dttm').groupby('hospitalization_id').first().reset_index()
 
-    print(f"First ICU stays: {len(first_icu):,} hospitalizations")
+@app.cell
+def _(consort_counts, icu_filtered):
+    # INCLUSION: Hospital type filter (academic or community, exclude LTACH)
+    print("Applying hospital type filter...")
 
-    # Filter for Medical ICU (MICU) only
-    first_icu = first_icu[
-        first_icu['location_type'] == 'medical_icu'
+    if 'hospital_type' in icu_filtered.columns:
+        # Normalize hospital_type
+        icu_filtered['hospital_type'] = icu_filtered['hospital_type'].str.lower()
+
+        # Filter for academic and community only (exclude LTACH)
+        icu_hosp_type = icu_filtered[
+            icu_filtered['hospital_type'].isin(['academic', 'community'])
+        ].copy()
+
+        n_hosp_type = icu_hosp_type['hospitalization_id'].nunique()
+        consort_counts['hospital_type'] = {
+            'description': 'Academic or Community hospital (exclude LTACH)',
+            'n': n_hosp_type
+        }
+        print(f"After hospital type filter (academic/community): {n_hosp_type:,} hospitalizations")
+    else:
+        print("WARNING: hospital_type column not found in ADT data. Skipping hospital type filter.")
+        icu_hosp_type = icu_filtered.copy()
+        consort_counts['hospital_type'] = {
+            'description': 'Hospital type filter skipped (column not available)',
+            'n': icu_hosp_type['hospitalization_id'].nunique()
+        }
+    return (icu_hosp_type,)
+
+
+@app.cell
+def _(icu_hosp_type):
+    # Consolidate consecutive ADT stays AFTER filters (performance optimization)
+    # Only for hospitalizations with ED before ICU
+
+    print("Consolidating consecutive ADT location stays...")
+
+    df = icu_hosp_type.copy()
+
+    # Find hospitalizations with ED followed by ICU (in time order)
+    def has_ed_then_icu(group):
+        group = group.sort_values('in_dttm')
+        cats = group['location_category'].tolist()
+        if 'ed' in cats and 'icu' in cats:
+            return cats.index('ed') < cats.index('icu')
+        return False
+
+    relevant_hosps = df.groupby('hospitalization_id').filter(
+        lambda x: has_ed_then_icu(x)
+    )['hospitalization_id'].unique().tolist()
+
+    print(f"Hospitalizations with ED→ICU pathway: {len(relevant_hosps):,}")
+
+    # Filter to relevant hospitalizations
+    df = df[df['hospitalization_id'].isin(relevant_hosps)].copy()
+    df = df.sort_values(['hospitalization_id', 'in_dttm']).reset_index(drop=True)
+
+    # Handle ICU→OR→ICU pattern
+    df['effective_category'] = df['location_category'].copy()
+
+    for hosp_id in df['hospitalization_id'].unique():
+        mask = df['hospitalization_id'] == hosp_id
+        hosp_subset = df.loc[mask].copy()
+
+        for i in range(1, len(hosp_subset) - 1):
+            idx = hosp_subset.index[i]
+            prev_idx = hosp_subset.index[i - 1]
+            next_idx = hosp_subset.index[i + 1]
+
+            curr_cat = hosp_subset.loc[idx, 'location_category']
+            prev_cat = hosp_subset.loc[prev_idx, 'effective_category']
+            next_cat = hosp_subset.loc[next_idx, 'location_category']
+
+            if curr_cat == 'or' and prev_cat == 'icu' and next_cat == 'icu':
+                df.loc[idx, 'effective_category'] = 'icu'
+
+    # Group consecutive same-category stays
+    df['category_change'] = (
+        (df['effective_category'] != df['effective_category'].shift()) |
+        (df['hospitalization_id'] != df['hospitalization_id'].shift())
+    ).astype(int)
+    df['stay_group'] = df['category_change'].cumsum()
+
+    # Aggregate
+    agg_dict = {
+        'hospitalization_id': 'first',
+        'patient_id': 'first',
+        'location_category': 'first',
+        'effective_category': 'first',
+        'location_type': 'first',
+        'in_dttm': 'min',
+        'out_dttm': 'max',
+        'age_at_admission': 'first',
+        'admission_dttm': 'first',
+        'discharge_dttm': 'first',
+        'discharge_category': 'first'
+    }
+
+    for opt_col in ['hospital_type', 'hospital_id']:
+        if opt_col in df.columns:
+            agg_dict[opt_col] = 'first'
+
+    icu_hosp_type_consolidated = df.groupby('stay_group').agg(agg_dict).reset_index(drop=True)
+    icu_hosp_type_consolidated['location_category'] = icu_hosp_type_consolidated['effective_category']
+    icu_hosp_type_consolidated = icu_hosp_type_consolidated.drop(columns=['effective_category'])
+
+    print(f"Records after consolidation: {len(icu_hosp_type_consolidated):,}")
+    return (icu_hosp_type_consolidated,)
+
+
+@app.cell
+def _(consort_counts, icu_hosp_type_consolidated):
+    # INCLUSION: First ICU admission (ALL ICU types)
+    print("Filtering for first ICU admission (all ICU types)...")
+
+    # Filter for ICU locations only
+    icu_only = icu_hosp_type_consolidated[
+        icu_hosp_type_consolidated['location_category'] == 'icu'
     ].copy()
-    print(f"Medical ICU only: {len(first_icu):,} hospitalizations")
+
+    # Get first ICU stay per hospitalization (sorted by in_dttm)
+    first_icu = icu_only.sort_values('in_dttm').groupby('hospitalization_id').first().reset_index()
+
+    # Rename columns for clarity
+    first_icu = first_icu.rename(columns={
+        'in_dttm': 'start_dttm',
+        'out_dttm': 'end_dttm'
+    })
+
+    n_first_icu = len(first_icu)
+    consort_counts['first_icu'] = {
+        'description': 'First ICU admission (all ICU types)',
+        'n': n_first_icu
+    }
+    print(f"First ICU admissions (all ICU types): {n_first_icu:,} hospitalizations")
     return (first_icu,)
+
+
+@app.cell
+def _(consort_counts, first_icu, icu_hosp_type_consolidated, pd):
+    # INCLUSION: Admitted to ICU via ED
+    print("Filtering for ED-to-ICU pathway...")
+
+    # Get ED records from consolidated ADT (consecutive ED stays already merged)
+    ed_records = icu_hosp_type_consolidated[
+        icu_hosp_type_consolidated['location_category'].str.lower() == 'ed'
+    ][['hospitalization_id', 'in_dttm', 'out_dttm']].copy()
+
+    ed_records = ed_records.rename(columns={
+        'in_dttm': 'ed_in_dttm',
+        'out_dttm': 'ed_out_dttm'
+    })
+
+    # Convert datetime
+    ed_records['ed_in_dttm'] = pd.to_datetime(ed_records['ed_in_dttm'])
+    ed_records['ed_out_dttm'] = pd.to_datetime(ed_records['ed_out_dttm'])
+
+    print(f"ED records found: {len(ed_records):,}")
+
+    # Merge ED records with first ICU stays
+    first_icu_with_ed = pd.merge(
+        first_icu,
+        ed_records,
+        on='hospitalization_id',
+        how='left'
+    )
+
+    # Filter: ED record must exist AND ED discharge <= ICU admission
+    # This ensures patient came through ED before ICU
+    first_icu_ed_pathway = first_icu_with_ed[
+        (first_icu_with_ed['ed_in_dttm'].notna()) &
+        (first_icu_with_ed['ed_out_dttm'] <= first_icu_with_ed['start_dttm'])
+    ].copy()
+
+    # Keep earliest ED record per hospitalization (in case multiple ED visits)
+    first_icu_ed_pathway = first_icu_ed_pathway.sort_values('ed_in_dttm').groupby('hospitalization_id').first().reset_index()
+
+    n_ed_to_icu = len(first_icu_ed_pathway)
+    consort_counts['ed_to_icu'] = {
+        'description': 'Admitted to ICU via ED',
+        'n': n_ed_to_icu
+    }
+    print(f"After ED-to-ICU pathway filter: {n_ed_to_icu:,} hospitalizations")
+    return (first_icu_ed_pathway,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Apply Exclusion Criteria""")
+    return
+
+
+@app.cell
+def _(consort_counts, first_icu_ed_pathway, hosp_df, pd):
+    # EXCLUSION: Prior hospitalization within 48 hours
+    print("\n=== Applying Exclusion Criteria ===")
+    print("Checking for prior hospitalizations within 48 hours...")
+
+    # Get all hospitalizations for patients in cohort
+    cohort_patients = first_icu_ed_pathway['patient_id'].unique()
+
+    # Get discharge times for all hospitalizations of these patients
+    all_hosp = hosp_df[hosp_df['patient_id'].isin(cohort_patients)][
+        ['patient_id', 'hospitalization_id', 'admission_dttm', 'discharge_dttm']
+    ].copy()
+    all_hosp['admission_dttm'] = pd.to_datetime(all_hosp['admission_dttm'])
+    all_hosp['discharge_dttm'] = pd.to_datetime(all_hosp['discharge_dttm'])
+
+    # Merge cohort with ED admission time
+    cohort_with_timing = first_icu_ed_pathway[['hospitalization_id', 'patient_id', 'ed_in_dttm']].copy()
+
+    # For each hospitalization, find if there's a prior discharge within 48 hours
+    def check_prior_48hr(row, all_hosp_df):
+        patient_hosps = all_hosp_df[
+            (all_hosp_df['patient_id'] == row['patient_id']) &
+            (all_hosp_df['hospitalization_id'] != row['hospitalization_id']) &
+            (all_hosp_df['discharge_dttm'] < row['ed_in_dttm'])
+        ]
+        if len(patient_hosps) == 0:
+            return False  # No prior hospitalizations
+        # Check if any discharge is within 48 hours of ED admission
+        hours_since_discharge = (row['ed_in_dttm'] - patient_hosps['discharge_dttm']).dt.total_seconds() / 3600
+        return (hours_since_discharge <= 48).any()
+
+    # Apply check
+    cohort_with_timing['has_prior_48hr'] = cohort_with_timing.apply(
+        lambda row: check_prior_48hr(row, all_hosp), axis=1
+    )
+
+    # Get hospitalizations to exclude
+    exclude_48hr = cohort_with_timing[cohort_with_timing['has_prior_48hr']]['hospitalization_id'].tolist()
+
+    # Filter cohort
+    cohort_no_readmit = first_icu_ed_pathway[
+        ~first_icu_ed_pathway['hospitalization_id'].isin(exclude_48hr)
+    ].copy()
+
+    n_excluded_48hr = len(first_icu_ed_pathway) - len(cohort_no_readmit)
+    consort_counts['excl_48hr_readmit'] = {
+        'description': 'Excluded: Prior hospitalization within 48 hours',
+        'n_excluded': n_excluded_48hr,
+        'n_remaining': len(cohort_no_readmit)
+    }
+    print(f"Excluded (prior hospitalization within 48hr): {n_excluded_48hr:,}")
+    print(f"Remaining: {len(cohort_no_readmit):,} hospitalizations")
+    return (cohort_no_readmit,)
+
+
+@app.cell
+def _(Labs, apply_outlier_handling, cohort_no_readmit, consort_counts):
+    # EXCLUSION: Immunocompromised (neutrophils_absolute < 500)
+    print("Checking for immunocompromised patients (neutrophils_absolute < 500)...")
+
+    # Get hospitalization IDs
+    cohort_hosp_ids_neutro = cohort_no_readmit['hospitalization_id'].astype(str).unique().tolist()
+
+    # Load neutrophils lab data
+    try:
+        neutrophil_table = Labs.from_file(
+            config_path='clif_config.json',
+            filters={
+                'hospitalization_id': cohort_hosp_ids_neutro,
+                'lab_category': ['neutrophils_absolute']
+            },
+            columns=['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value_numeric']
+        )
+
+        neutrophil_df = neutrophil_table.df.copy()
+        print(f"Neutrophil labs loaded: {len(neutrophil_df):,} records")
+
+        # Apply outlier handling
+        apply_outlier_handling(neutrophil_table)
+        neutrophil_df = neutrophil_table.df.copy()
+
+        # Count hospitalizations with neutrophil data
+        hosp_with_neutro = neutrophil_df['hospitalization_id'].nunique()
+        hosp_missing_neutro = len(cohort_no_readmit) - hosp_with_neutro
+        print(f"  Hospitalizations with neutrophil data: {hosp_with_neutro:,}")
+        print(f"  Hospitalizations missing neutrophil data: {hosp_missing_neutro:,} (NOT excluded)")
+
+        # Find hospitalizations with ANY neutrophil < 500 at any timepoint
+        # NOTE: Only exclude if neutrophil < 500 is FOUND. Missing labs = NOT excluded.
+        immunocompromised_hosp = neutrophil_df[
+            neutrophil_df['lab_value_numeric'] < 0.5
+        ]['hospitalization_id'].unique()
+
+        # Filter cohort - exclude only those with neutrophil < 500 (missing labs stay in cohort)
+        cohort_no_immunocomp = cohort_no_readmit[
+            ~cohort_no_readmit['hospitalization_id'].isin(immunocompromised_hosp)
+        ].copy()
+
+        n_excluded_immunocomp = len(cohort_no_readmit) - len(cohort_no_immunocomp)
+
+    except Exception as e:
+        print(f"WARNING: Could not load neutrophils_absolute lab data: {e}")
+        print("Skipping immunocompromised exclusion.")
+        cohort_no_immunocomp = cohort_no_readmit.copy()
+        n_excluded_immunocomp = 0
+
+    consort_counts['excl_immunocompromised'] = {
+        'description': 'Excluded: Immunocompromised (neutrophils < 500)',
+        'n_excluded': n_excluded_immunocomp,
+        'n_remaining': len(cohort_no_immunocomp)
+    }
+    print(f"Excluded (immunocompromised): {n_excluded_immunocomp:,}")
+    print(f"Remaining: {len(cohort_no_immunocomp):,} hospitalizations")
+    return cohort_no_immunocomp, neutrophil_df
+
+
+@app.cell
+def _(neutrophil_df):
+    neutrophil_df['lab_value_numeric'].value_counts()
+    return
+
+
+@app.cell
+def _(cohort_no_immunocomp, consort_counts):
+    # EXCLUSION: Hospital LOS < 96 hours (4 days)
+    print("Checking for hospital LOS < 96 hours...")
+
+    # Calculate hospital LOS in hours
+    cohort_no_immunocomp['hospital_los_hours'] = (
+        cohort_no_immunocomp['discharge_dttm'] - cohort_no_immunocomp['admission_dttm']
+    ).dt.total_seconds() / 3600
+
+    # Filter: hospital LOS >= 96 hours
+    cohort_min_los = cohort_no_immunocomp[
+        cohort_no_immunocomp['hospital_los_hours'] >= 96
+    ].copy()
+
+    n_excluded_short_los = len(cohort_no_immunocomp) - len(cohort_min_los)
+    consort_counts['excl_short_hospital_los'] = {
+        'description': 'Excluded: Hospital LOS < 96 hours',
+        'n_excluded': n_excluded_short_los,
+        'n_remaining': len(cohort_min_los)
+    }
+    print(f"Excluded (hospital LOS < 96 hours): {n_excluded_short_los:,}")
+    print(f"Remaining: {len(cohort_min_los):,} hospitalizations")
+    return (cohort_min_los,)
+
+
+@app.cell
+def _(cohort_min_los, consort_counts, patient_df, pd):
+    # EXCLUSION: Died within 6 hours of ICU arrival
+    print("Checking for deaths within 6 hours of ICU arrival...")
+
+    # Merge with patient death_dttm
+    cohort_with_death = pd.merge(
+        cohort_min_los,
+        patient_df[['patient_id', 'death_dttm']],
+        on='patient_id',
+        how='left'
+    )
+
+    # Convert death_dttm
+    cohort_with_death['death_dttm'] = pd.to_datetime(cohort_with_death['death_dttm'])
+
+    # Calculate hours from ICU admission (start_dttm) to death
+    cohort_with_death['hours_to_death'] = (
+        cohort_with_death['death_dttm'] - cohort_with_death['start_dttm']
+    ).dt.total_seconds() / 3600
+
+    # Exclude if death within 6 hours of ICU arrival
+    # Keep if: no death_dttm (survived), died after 6 hours, or death before ICU (data issue)
+    cohort_no_early_death = cohort_with_death[
+        (cohort_with_death['death_dttm'].isna()) |  # Did not die
+        (cohort_with_death['hours_to_death'] > 6) |  # Died after 6 hours
+        (cohort_with_death['hours_to_death'] < 0)    # Death recorded before ICU admission
+    ].copy()
+
+    n_excluded_early_death = len(cohort_min_los) - len(cohort_no_early_death)
+    consort_counts['excl_early_death'] = {
+        'description': 'Excluded: Died within 6 hours of ICU arrival',
+        'n_excluded': n_excluded_early_death,
+        'n_remaining': len(cohort_no_early_death)
+    }
+    print(f"Excluded (died within 6 hours of ICU): {n_excluded_early_death:,}")
+    print(f"Remaining: {len(cohort_no_early_death):,} hospitalizations")
+
+    # Final cohort count
+    consort_counts['final'] = {
+        'description': 'Final analytic cohort',
+        'n': len(cohort_no_early_death)
+    }
+    print(f"\n=== FINAL COHORT: {len(cohort_no_early_death):,} hospitalizations ===")
+    return (cohort_no_early_death,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Generate CONSORT Flowchart""")
+    return
+
+
+@app.cell
+def _(consort_counts, json, os, plt):
+    # Create CONSORT flowchart
+    def create_consort_flowchart(counts, output_path='PHI_DATA/consort_flowchart.png'):
+        """
+        Generate a CONSORT-style inclusion/exclusion flowchart.
+        """
+        fig, ax = plt.subplots(figsize=(14, 18))
+        ax.set_xlim(0, 12)
+        ax.set_ylim(0, 22)
+        ax.axis('off')
+
+        # Colors
+        inclusion_color = '#B3D9FF'  # Light blue
+        exclusion_color = '#FFFFB3'  # Light yellow
+        final_color = '#B3FFB3'      # Light green
+
+        # Y positions for flow
+        y_pos = {
+            'initial': 20,
+            'year_adult': 17,
+            'hospital_type': 14,
+            'first_icu': 11,
+            'ed_to_icu': 8,
+            'exclusions': 5,
+            'final': 1.5
+        }
+
+        # Box dimensions
+        box_width = 4
+        box_height = 1.5
+
+        def draw_box(x, y, text, color, fontsize=9):
+            """Draw a rounded box with text."""
+            box = plt.Rectangle((x - box_width/2, y - box_height/2),
+                                box_width, box_height,
+                                facecolor=color, edgecolor='black',
+                                linewidth=1.5, zorder=2,
+                                joinstyle='round')
+            ax.add_patch(box)
+            ax.text(x, y, text, ha='center', va='center',
+                   fontsize=fontsize, wrap=True, zorder=3)
+
+        def draw_arrow(x1, y1, x2, y2, color='black'):
+            """Draw an arrow between two points."""
+            ax.annotate('', xy=(x2, y2 + box_height/2),
+                       xytext=(x1, y1 - box_height/2),
+                       arrowprops=dict(arrowstyle='->', color=color, lw=1.5))
+
+        # Main flow (center x = 5)
+        main_x = 5
+
+        # 1. Initial box
+        if 'initial' in counts:
+            text = f"Total hospitalizations\nN = {counts['initial']['n']:,}"
+            draw_box(main_x, y_pos['initial'], text, inclusion_color)
+
+        # 2. Year & Adult filter
+        if 'year_adult' in counts:
+            text = f"Adults (≥18), 2018-2024\nN = {counts['year_adult']['n']:,}"
+            draw_box(main_x, y_pos['year_adult'], text, inclusion_color)
+            draw_arrow(main_x, y_pos['initial'], main_x, y_pos['year_adult'])
+
+        # 3. Hospital type filter
+        if 'hospital_type' in counts:
+            text = f"Academic/Community hospital\n(exclude LTACH)\nN = {counts['hospital_type']['n']:,}"
+            draw_box(main_x, y_pos['hospital_type'], text, inclusion_color)
+            draw_arrow(main_x, y_pos['year_adult'], main_x, y_pos['hospital_type'])
+
+        # 4. First ICU
+        if 'first_icu' in counts:
+            text = f"First ICU admission\n(all ICU types)\nN = {counts['first_icu']['n']:,}"
+            draw_box(main_x, y_pos['first_icu'], text, inclusion_color)
+            draw_arrow(main_x, y_pos['hospital_type'], main_x, y_pos['first_icu'])
+
+        # 5. ED to ICU
+        if 'ed_to_icu' in counts:
+            text = f"Admitted via ED\nN = {counts['ed_to_icu']['n']:,}"
+            draw_box(main_x, y_pos['ed_to_icu'], text, inclusion_color)
+            draw_arrow(main_x, y_pos['first_icu'], main_x, y_pos['ed_to_icu'])
+
+        # Exclusions box (right side)
+        excl_x = 9.5
+        excl_y = y_pos['exclusions']
+
+        # Calculate total exclusions
+        exclusion_items = []
+        if 'excl_48hr_readmit' in counts:
+            exclusion_items.append(f"Prior hospitalization <48h: n={counts['excl_48hr_readmit']['n_excluded']:,}")
+        if 'excl_immunocompromised' in counts:
+            exclusion_items.append(f"Immunocompromised: n={counts['excl_immunocompromised']['n_excluded']:,}")
+        if 'excl_short_hospital_los' in counts:
+            exclusion_items.append(f"Hospital LOS <96h: n={counts['excl_short_hospital_los']['n_excluded']:,}")
+        if 'excl_early_death' in counts:
+            exclusion_items.append(f"Died <6h of ICU: n={counts['excl_early_death']['n_excluded']:,}")
+
+        total_excluded = sum([
+            counts.get('excl_48hr_readmit', {}).get('n_excluded', 0),
+            counts.get('excl_immunocompromised', {}).get('n_excluded', 0),
+            counts.get('excl_short_hospital_los', {}).get('n_excluded', 0),
+            counts.get('excl_early_death', {}).get('n_excluded', 0)
+        ])
+
+        if exclusion_items:
+            excl_text = "EXCLUDED\n" + "\n".join(exclusion_items) + f"\n\nTotal excluded: n={total_excluded:,}"
+            # Larger box for exclusions
+            excl_box = plt.Rectangle((excl_x - 2.5, excl_y - 2),
+                                     5, 4,
+                                     facecolor=exclusion_color, edgecolor='black',
+                                     linewidth=1.5, zorder=2)
+            ax.add_patch(excl_box)
+            ax.text(excl_x, excl_y, excl_text, ha='center', va='center',
+                   fontsize=8, wrap=True, zorder=3)
+
+            # Arrow from ED to ICU to exclusions
+            ax.annotate('', xy=(excl_x - 2.5, excl_y),
+                       xytext=(main_x + box_width/2, y_pos['ed_to_icu']),
+                       arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
+
+        # Arrow from exclusions area to final
+        draw_arrow(main_x, y_pos['ed_to_icu'] - 1, main_x, y_pos['final'] + 1)
+
+        # Final cohort box
+        if 'final' in counts:
+            text = f"FINAL ANALYTIC COHORT\nN = {counts['final']['n']:,}"
+            # Larger final box
+            final_box = plt.Rectangle((main_x - 2, y_pos['final'] - 0.75),
+                                      4, 1.5,
+                                      facecolor=final_color, edgecolor='black',
+                                      linewidth=2, zorder=2)
+            ax.add_patch(final_box)
+            ax.text(main_x, y_pos['final'], text, ha='center', va='center',
+                   fontsize=10, fontweight='bold', wrap=True, zorder=3)
+
+        # Title
+        ax.set_title('CONSORT Flow Diagram: ICU Cohort Selection',
+                    fontsize=14, fontweight='bold', y=0.98)
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"CONSORT flowchart saved to: {output_path}")
+
+        return fig
+
+    # Create PHI_DATA directory if needed
+    os.makedirs('PHI_DATA', exist_ok=True)
+
+    # Generate flowchart
+    consort_fig = create_consort_flowchart(consort_counts)
+
+    # Save counts to JSON
+    with open('PHI_DATA/consort_counts.json', 'w') as f:
+        json.dump(consort_counts, f, indent=2, default=str)
+    print("CONSORT counts saved to: PHI_DATA/consort_counts.json")
+    return
+
+
+@app.cell
+def _(cohort_no_early_death):
+    cohort_no_early_death
+    return
 
 
 @app.cell
@@ -195,22 +800,16 @@ def _(mo):
 
 
 @app.cell
-def _(first_icu, patient_df, pd):
+def _(cohort_no_early_death, patient_df, pd):
     # Merge with patient demographics
     print("Adding patient demographics...")
 
     cohort_df = pd.merge(
-        first_icu[['patient_id', 'hospitalization_id', 'age_at_admission', 'in_dttm', 'out_dttm',     'location_type','admission_dttm', 'discharge_dttm','discharge_category']],
-        patient_df[['patient_id', 'sex_category', 'ethnicity_category', 'race_category', 'language_category', 'death_dttm']],
+        cohort_no_early_death,
+        patient_df[['patient_id', 'sex_category', 'ethnicity_category', 'race_category', 'language_category']],
         on='patient_id',
         how='left'
     )
-
-    # Rename columns for clarity
-    cohort_df = cohort_df.rename(columns={
-        'in_dttm': 'start_dttm',
-        'out_dttm': 'end_dttm'
-    })
 
     # Recode language_category to English/Non-English
     cohort_df['language_category'] = cohort_df['language_category'].str.lower()
@@ -264,11 +863,13 @@ def _(first_icu, patient_df, pd):
     # Calculate ICU Length of Stay (LOS) in days
     cohort_df['icu_los_days'] = (cohort_df['end_dttm'] - cohort_df['start_dttm']).dt.total_seconds() / (24 * 3600)
 
-    # Calculate ICU Mortality (binary: 1 = died during ICU stay, 0 = did not die during ICU stay)
-    # Convert death_dttm to datetime if not already
-    cohort_df['death_dttm'] = pd.to_datetime(cohort_df['death_dttm'])
+    # Filter out negative ICU LOS (data quality issue)
+    n_negative_los = (cohort_df['icu_los_days'] < 0).sum()
+    if n_negative_los > 0:
+        print(f"WARNING: Removing {n_negative_los} records with negative ICU LOS")
+        cohort_df = cohort_df[cohort_df['icu_los_days'] >= 0].copy()
 
-    # Check if death_dttm falls within ICU stay window (start_dttm to end_dttm)
+    # Calculate ICU Mortality (binary: 1 = died during ICU stay, 0 = did not die during ICU stay)
     cohort_df['icu_mortality'] = (
         (cohort_df['death_dttm'].notna()) &  # death_dttm is not null
         (cohort_df['death_dttm'] >= cohort_df['start_dttm']) &  # death occurred after/at ICU start
@@ -278,36 +879,6 @@ def _(first_icu, patient_df, pd):
     print(f"\n=== ICU Mortality ===")
     print(f"Deaths during ICU stay: {cohort_df['icu_mortality'].sum():,} ({cohort_df['icu_mortality'].mean()*100:.2f}%)")
     print(f"Survived ICU stay: {(cohort_df['icu_mortality'] == 0).sum():,}")
-
-    # Remove encounters with short ICU LOS (≤6 hours / 0.25 days)
-    cohort_before_los_filter = len(cohort_df)
-    cohort_df = cohort_df[cohort_df['icu_los_days'] > 0.25].copy()
-    removed_short_los = cohort_before_los_filter - len(cohort_df)
-    if removed_short_los > 0:
-        print(f"WARNING: Removed {removed_short_los:,} encounters with short ICU LOS (<=6 hours / 0.25 days)")
-
-    # Reorder columns (vital columns will be added after vitals processing)
-    base_columns = [
-        'patient_id',
-        'hospitalization_id',
-        'age_at_admission',
-        'admission_dttm', 'discharge_dttm','discharge_category',
-        'start_dttm',
-        'end_dttm',
-        'hospital_los_days',
-        'icu_los_days',
-        'inpatient_mortality',
-        'icu_mortality',
-        'location_type',
-        'sex_category',
-        'ethnicity_category',
-        'race_category',
-        'race_ethnicity',
-        'language_category'
-    ]
-
-    # Only select columns that exist in cohort_df at this point
-    cohort_df = cohort_df[[col for col in base_columns if col in cohort_df.columns]]
 
     print(f"Final cohort: {len(cohort_df):,} hospitalizations")
     return (cohort_df,)
@@ -415,34 +986,8 @@ def _(cohort_df, pd, vitals_df):
 
     print(f"Vitals merged to cohort: {len(cohort_with_vitals):,} hospitalizations")
 
-    # Reorder columns with vitals included
-    final_column_order = [
-        'patient_id',
-        'hospitalization_id',
-        'age_at_admission',
-        'admission_dttm', 'discharge_dttm','discharge_category',
-        'start_dttm',
-        'end_dttm',
-        'hospital_los_days',
-        'icu_los_days',
-        'inpatient_mortality',
-        'icu_mortality',
-        'highest_temperature',
-        'lowest_temperature',
-        'lowest_map',
-        'location_type',
-        'sex_category',
-        'ethnicity_category',
-        'race_category',
-        'race_ethnicity',
-        'language_category'
-    ]
-
-    # Only select columns that exist
-    cohort_with_vitals_df = cohort_with_vitals[[col for col in final_column_order if col in cohort_with_vitals.columns]]
-
     # Return final cohort with vitals (renamed to avoid circular dependency)
-    return (cohort_with_vitals_df,)
+    return (cohort_with_vitals,)
 
 
 @app.cell
@@ -525,12 +1070,12 @@ def _(cohort_df, meds_df, pd):
 
 
 @app.cell
-def _(cohort_with_vitals_df, pd, vaso_summary):
+def _(cohort_with_vitals, pd, vaso_summary):
     # Merge vasopressor metrics back to cohort
     print("Merging vasopressor metrics to cohort...")
 
     cohort_with_meds = pd.merge(
-        cohort_with_vitals_df,
+        cohort_with_vitals,
         vaso_summary,
         on='hospitalization_id',
         how='left'
@@ -544,36 +1089,8 @@ def _(cohort_with_vitals_df, pd, vaso_summary):
     print(f"  Hospitalizations with vasopressors: {(cohort_with_meds['vasopressor_ever'] == 1).sum():,} ({(cohort_with_meds['vasopressor_ever'] == 1).mean()*100:.1f}%)")
     print(f"  Hospitalizations without vasopressors: {(cohort_with_meds['vasopressor_ever'] == 0).sum():,} ({(cohort_with_meds['vasopressor_ever'] == 0).mean()*100:.1f}%)")
 
-    # Reorder columns with vasopressor columns included
-    final_column_order_with_meds = [
-        'patient_id',
-        'hospitalization_id',
-        'age_at_admission',
-        'admission_dttm', 'discharge_dttm','discharge_category',
-        'start_dttm',
-        'end_dttm',
-        'hospital_los_days',
-        'icu_los_days',
-        'inpatient_mortality',
-        'icu_mortality',
-        'highest_temperature',
-        'lowest_temperature',
-        'lowest_map',
-        'vasopressor_ever',
-        'no_of_vasopressor',
-        'location_type',
-        'sex_category',
-        'ethnicity_category',
-        'race_category',
-        'race_ethnicity',
-        'language_category'
-    ]
-
-    # Only select columns that exist
-    cohort_final = cohort_with_meds[[col for col in final_column_order_with_meds if col in cohort_with_meds.columns]]
-
     # Return final cohort with all features
-    return (cohort_final,)
+    return (cohort_with_meds,)
 
 
 @app.cell
@@ -669,12 +1186,12 @@ def _(cohort_df, labs_df, pd):
 
 
 @app.cell
-def _(cohort_final, labs_pivot, pd):
+def _(cohort_with_meds, labs_pivot, pd):
     # Merge labs back to cohort
     print("Merging labs to cohort...")
 
     cohort_with_labs = pd.merge(
-        cohort_final,
+        cohort_with_meds,
         labs_pivot,
         on='hospitalization_id',
         how='left'
@@ -682,38 +1199,8 @@ def _(cohort_final, labs_pivot, pd):
 
     print(f"Labs merged to cohort: {len(cohort_with_labs):,} hospitalizations")
 
-    # Reorder columns with labs included
-    final_column_order_with_labs = [
-        'patient_id',
-        'hospitalization_id',
-        'age_at_admission',
-        'admission_dttm', 'discharge_dttm','discharge_category',
-        'start_dttm',
-        'end_dttm',
-        'hospital_los_days',
-        'icu_los_days',
-        'inpatient_mortality',
-        'icu_mortality',
-        'highest_temperature',
-        'lowest_temperature',
-        'lowest_map',
-        'highest_wbc',
-        'highest_creatinine',
-        'vasopressor_ever',
-        'no_of_vasopressor',
-        'location_type',
-        'sex_category',
-        'ethnicity_category',
-        'race_category',
-        'race_ethnicity',
-        'language_category'
-    ]
-
-    # Only select columns that exist
-    cohort_complete = cohort_with_labs[[col for col in final_column_order_with_labs if col in cohort_with_labs.columns]]
-
     # Return complete cohort with all features
-    return (cohort_complete,)
+    return (cohort_with_labs,)
 
 
 @app.cell
@@ -805,12 +1292,12 @@ def _(cohort_df, pd, resp_df):
 
 
 @app.cell
-def _(cohort_complete, pd, resp_summary):
+def _(cohort_with_labs, pd, resp_summary):
     # Merge respiratory support metrics to cohort
     print("Merging respiratory support metrics to cohort...")
 
     cohort_with_resp = pd.merge(
-        cohort_complete,
+        cohort_with_labs,
         resp_summary,
         on='hospitalization_id',
         how='left'
@@ -822,48 +1309,9 @@ def _(cohort_complete, pd, resp_summary):
     cohort_with_resp['IMV_ever'] = cohort_with_resp['IMV_ever'].fillna(0).astype(int)
 
     print(f"Respiratory support metrics merged to cohort: {len(cohort_with_resp):,} hospitalizations")
-    print(f"  Hospitalizations with NIPPV: {(cohort_with_resp['NIPPV_ever'] == 1).sum():,} ({(cohort_with_resp['NIPPV_ever'] == 1).mean()*100:.1f}%)")
-    print(f"  Hospitalizations without NIPPV: {(cohort_with_resp['NIPPV_ever'] == 0).sum():,} ({(cohort_with_resp['NIPPV_ever'] == 0).mean()*100:.1f}%)")
-    print(f"  Hospitalizations with HFNO: {(cohort_with_resp['HFNO_ever'] == 1).sum():,} ({(cohort_with_resp['HFNO_ever'] == 1).mean()*100:.1f}%)")
-    print(f"  Hospitalizations without HFNO: {(cohort_with_resp['HFNO_ever'] == 0).sum():,} ({(cohort_with_resp['HFNO_ever'] == 0).mean()*100:.1f}%)")
-    print(f"  Hospitalizations with IMV: {(cohort_with_resp['IMV_ever'] == 1).sum():,} ({(cohort_with_resp['IMV_ever'] == 1).mean()*100:.1f}%)")
-    print(f"  Hospitalizations without IMV: {(cohort_with_resp['IMV_ever'] == 0).sum():,} ({(cohort_with_resp['IMV_ever'] == 0).mean()*100:.1f}%)")
-
-    # Reorder columns with respiratory support columns included
-    final_column_order_with_resp = [
-        'patient_id',
-        'hospitalization_id',
-        'age_at_admission',
-        'admission_dttm', 'discharge_dttm','discharge_category',
-        'start_dttm',
-        'end_dttm',
-        'hospital_los_days',
-        'icu_los_days',
-        'inpatient_mortality',
-        'icu_mortality',
-        'highest_temperature',
-        'lowest_temperature',
-        'lowest_map',
-        'highest_wbc',
-        'highest_creatinine',
-        'NIPPV_ever',
-        'HFNO_ever',
-        'IMV_ever',
-        'vasopressor_ever',
-        'no_of_vasopressor',
-        'location_type',
-        'sex_category',
-        'ethnicity_category',
-        'race_category',
-        'race_ethnicity',
-        'language_category'
-    ]
-
-    # Only select columns that exist
-    cohort_final_with_resp = cohort_with_resp[[col for col in final_column_order_with_resp if col in cohort_with_resp.columns]]
 
     # Return complete cohort with all features including respiratory support
-    return (cohort_final_with_resp,)
+    return (cohort_with_resp,)
 
 
 @app.cell
@@ -887,7 +1335,7 @@ def _(CrrtTherapy, cohort_df):
         filters={
             'hospitalization_id': cohort_hosp_ids_crrt
         },
-        columns=['hospitalization_id', 'recorded_dttm']
+        columns=['hospitalization_id', 'recorded_dttm', 'blood_flow_rate']
     )
 
     crrt_df = crrt_table.df.copy()
@@ -919,74 +1367,432 @@ def _(cohort_df, crrt_df, pd):
 
     print(f"CRRT filtered to ICU windows: {len(crrt_icu_window):,} records")
 
-    # Create crrt_ever flag
+    # Create crrt_ever flag (any CRRT record)
     print("Creating crrt_ever flag...")
-
-    # Group by hospitalization_id and create binary flag
     crrt_summary = crrt_icu_window.groupby('hospitalization_id').size().reset_index(name='crrt_count')
     crrt_summary['crrt_ever'] = 1
 
+    # Create crrt_with_flow flag (CRRT with blood_flow_rate > 0) for AKI staging
+    print("Creating crrt_with_flow flag (blood_flow_rate > 0)...")
+    _crrt_with_flow = crrt_icu_window[crrt_icu_window['blood_flow_rate'] > 0]
+    _crrt_flow_summary = _crrt_with_flow.groupby('hospitalization_id').size().reset_index(name='crrt_flow_count')
+    _crrt_flow_summary['crrt_with_flow'] = 1
+
+    # Merge flow flag into summary
+    crrt_summary = pd.merge(
+        crrt_summary,
+        _crrt_flow_summary[['hospitalization_id', 'crrt_with_flow']],
+        on='hospitalization_id',
+        how='left'
+    )
+    crrt_summary['crrt_with_flow'] = crrt_summary['crrt_with_flow'].fillna(0).astype(int)
+
     print(f"CRRT metrics calculated for {len(crrt_summary):,} hospitalizations")
-    print(f"\n=== CRRT Usage ===")
-    print(f"Hospitalizations with CRRT: {len(crrt_summary):,}")
+    print("\n=== CRRT Usage ===")
+    print(f"Hospitalizations with any CRRT record: {len(crrt_summary):,}")
+    print(f"Hospitalizations with CRRT blood_flow > 0: {(crrt_summary['crrt_with_flow'] == 1).sum():,}")
     return (crrt_summary,)
 
 
 @app.cell
-def _(cohort_final_with_resp, crrt_summary, pd):
+def _(cohort_with_resp, crrt_summary, pd):
     # Merge CRRT metrics to cohort
     print("Merging CRRT metrics to cohort...")
 
     cohort_with_crrt = pd.merge(
-        cohort_final_with_resp,
-        crrt_summary[['hospitalization_id', 'crrt_ever']],
+        cohort_with_resp,
+        crrt_summary[['hospitalization_id', 'crrt_ever', 'crrt_with_flow']],
         on='hospitalization_id',
         how='left'
     )
 
     # Fill NaN (no CRRT) with 0
     cohort_with_crrt['crrt_ever'] = cohort_with_crrt['crrt_ever'].fillna(0).astype(int)
+    cohort_with_crrt['crrt_with_flow'] = cohort_with_crrt['crrt_with_flow'].fillna(0).astype(int)
 
     print(f"CRRT metrics merged to cohort: {len(cohort_with_crrt):,} hospitalizations")
     print(f"  Hospitalizations with CRRT: {(cohort_with_crrt['crrt_ever'] == 1).sum():,} ({(cohort_with_crrt['crrt_ever'] == 1).mean()*100:.1f}%)")
-    print(f"  Hospitalizations without CRRT: {(cohort_with_crrt['crrt_ever'] == 0).sum():,} ({(cohort_with_crrt['crrt_ever'] == 0).mean()*100:.1f}%)")
-
-    # Reorder columns with CRRT column included
-    final_column_order_with_crrt = [
-        'patient_id',
-        'hospitalization_id',
-        'age_at_admission',
-        'admission_dttm', 'discharge_dttm','discharge_category',
-        'start_dttm',
-        'end_dttm',
-        'hospital_los_days',
-        'icu_los_days',
-        'inpatient_mortality',
-        'icu_mortality',
-        'highest_temperature',
-        'lowest_temperature',
-        'lowest_map',
-        'highest_wbc',
-        'highest_creatinine',
-        'NIPPV_ever',
-        'HFNO_ever',
-        'IMV_ever',
-        'crrt_ever',
-        'vasopressor_ever',
-        'no_of_vasopressor',
-        'location_type',
-        'sex_category',
-        'ethnicity_category',
-        'race_category',
-        'race_ethnicity',
-        'language_category'
-    ]
-
-    # Only select columns that exist
-    cohort_final_with_crrt = cohort_with_crrt[[col for col in final_column_order_with_crrt if col in cohort_with_crrt.columns]]
+    print(f"  Hospitalizations with CRRT blood_flow > 0: {(cohort_with_crrt['crrt_with_flow'] == 1).sum():,} ({(cohort_with_crrt['crrt_with_flow'] == 1).mean()*100:.1f}%)")
 
     # Return complete cohort with all features including CRRT
-    return (cohort_final_with_crrt,)
+    return (cohort_with_crrt,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Load C. diff Microbiology Data""")
+    return
+
+
+@app.cell
+def _(MicrobiologyNonculture, cohort_with_crrt):
+    # Load C. diff microbiology data
+    print("\n=== Loading C. diff Microbiology Data ===")
+
+    _cohort_hosp_ids_cdiff = cohort_with_crrt['hospitalization_id'].astype(str).unique().tolist()
+
+    cdiff_table = MicrobiologyNonculture.from_file(
+        config_path='clif_config.json',
+        filters={
+            'hospitalization_id': _cohort_hosp_ids_cdiff,
+            'organism_category': ['clostridium_difficile'],
+            'result_category': ['detected']
+        },
+        columns=['hospitalization_id', 'result_dttm', 'collect_dttm', 'organism_category', 'result_category']
+    )
+
+    cdiff_df = cdiff_table.df.copy()
+    print(f"C. diff positive tests loaded: {len(cdiff_df):,} records")
+    return (cdiff_df,)
+
+
+@app.cell
+def _(cdiff_df, cohort_with_crrt, pd):
+    # Filter C. diff to ICU start -> hospital discharge window
+    # Using collect_dttm (specimen collection time) for timing
+    print("Filtering C. diff to time window and removing duplicates...")
+
+    cdiff_with_windows = pd.merge(
+        cdiff_df,
+        cohort_with_crrt[['hospitalization_id', 'start_dttm', 'discharge_dttm']],
+        on='hospitalization_id',
+        how='inner'
+    )
+
+    cdiff_with_windows['collect_dttm'] = pd.to_datetime(cdiff_with_windows['collect_dttm'])
+
+    # Filter to ICU time window using collection datetime
+    cdiff_window = cdiff_with_windows[
+        (cdiff_with_windows['collect_dttm'] >= cdiff_with_windows['start_dttm']) &
+        (cdiff_with_windows['collect_dttm'] <= cdiff_with_windows['discharge_dttm'])
+    ].copy()
+
+    print(f"C. diff tests in time window: {len(cdiff_window):,}")
+
+    # Remove duplicates within 14 days per hospitalization (using collect_dttm)
+    cdiff_window = cdiff_window.sort_values(['hospitalization_id', 'collect_dttm'])
+
+    def _remove_14day_duplicates(group):
+        if len(group) <= 1:
+            return group
+
+        _keep_indices = [group.index[0]]  # Always keep first test
+        _last_kept_time = group.iloc[0]['collect_dttm']
+
+        for _idx, _row in group.iloc[1:].iterrows():
+            _days_since_last = (_row['collect_dttm'] - _last_kept_time).days
+            if _days_since_last >= 14:
+                _keep_indices.append(_idx)
+                _last_kept_time = _row['collect_dttm']
+
+        return group.loc[_keep_indices]
+
+    cdiff_unique = cdiff_window.groupby('hospitalization_id', group_keys=False).apply(_remove_14day_duplicates)
+
+    print(f"C. diff tests after removing 14-day duplicates: {len(cdiff_unique):,}")
+
+    # Create binary flag and get first positive collection timestamp
+    cdiff_summary = cdiff_unique.groupby('hospitalization_id').agg(
+        cdiff_count=('collect_dttm', 'size'),
+        cdiff_first_collect_dttm=('collect_dttm', 'min')
+    ).reset_index()
+    cdiff_summary['cdiff_positive'] = 1
+
+    print(f"Hospitalizations with C. diff positive: {len(cdiff_summary):,}")
+    return (cdiff_summary,)
+
+
+@app.cell
+def _(cdiff_summary, cohort_with_crrt, pd):
+    # Merge C. diff flag with cohort
+    print("Merging C. diff flag with cohort...")
+
+    cohort_with_cdiff = pd.merge(
+        cohort_with_crrt,
+        cdiff_summary[['hospitalization_id', 'cdiff_positive', 'cdiff_first_collect_dttm']],
+        on='hospitalization_id',
+        how='left'
+    )
+
+    cohort_with_cdiff['cdiff_positive'] = cohort_with_cdiff['cdiff_positive'].fillna(0).astype(int)
+
+    print(f"C. diff merged to cohort: {len(cohort_with_cdiff):,} hospitalizations")
+    print(f"  C. diff positive: {(cohort_with_cdiff['cdiff_positive'] == 1).sum():,} ({(cohort_with_cdiff['cdiff_positive'] == 1).mean()*100:.2f}%)")
+    return (cohort_with_cdiff,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""## Compute AKI Staging (ACORN JAMA 2024)""")
+    return
+
+
+@app.cell
+def _(Labs, apply_outlier_handling, cohort_with_cdiff, pd):
+    # Calculate baseline creatinine (measured or estimated)
+    print("\n=== AKI Staging: Calculating Baseline Creatinine ===")
+    print("Priority: Minimum creatinine from 12 months before ED presentation")
+    print("Fallback: Estimated formula (0.74 - 0.2*female + 0.08*Black + 0.003*age)")
+
+    # Load creatinine for baseline lookup (12 months before ED)
+    cohort_hosp_ids_baseline = cohort_with_cdiff['hospitalization_id'].astype(str).unique().tolist()
+
+    baseline_cr_table = Labs.from_file(
+        config_path='clif_config.json',
+        filters={
+            'hospitalization_id': cohort_hosp_ids_baseline,
+            'lab_category': ['creatinine']
+        },
+        columns=['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value_numeric']
+    )
+
+    apply_outlier_handling(baseline_cr_table)
+    baseline_cr_df = baseline_cr_table.df.copy()
+    print(f"Creatinine labs loaded for baseline lookup: {len(baseline_cr_df):,} records")
+
+    # Merge with cohort to get ed_in_dttm
+    baseline_cr_with_ed = pd.merge(
+        baseline_cr_df,
+        cohort_with_cdiff[['hospitalization_id', 'ed_in_dttm']],
+        on='hospitalization_id',
+        how='inner'
+    )
+
+    baseline_cr_with_ed['lab_result_dttm'] = pd.to_datetime(baseline_cr_with_ed['lab_result_dttm'])
+    baseline_cr_with_ed['ed_in_dttm'] = pd.to_datetime(baseline_cr_with_ed['ed_in_dttm'])
+
+    # Calculate 12 months before ED
+    baseline_cr_with_ed['baseline_window_start'] = baseline_cr_with_ed['ed_in_dttm'] - pd.Timedelta(days=365)
+
+    # Filter to 12 months before ED (excluding day of ED presentation)
+    baseline_window = baseline_cr_with_ed[
+        (baseline_cr_with_ed['lab_result_dttm'] >= baseline_cr_with_ed['baseline_window_start']) &
+        (baseline_cr_with_ed['lab_result_dttm'] < baseline_cr_with_ed['ed_in_dttm'])
+    ].copy()
+
+    print(f"Creatinine records in 12-month baseline window: {len(baseline_window):,}")
+
+    # Get MINIMUM creatinine per hospitalization (most conservative baseline)
+    measured_baseline = baseline_window.groupby('hospitalization_id').agg(
+        cr_baseline_measured=('lab_value_numeric', 'min')
+    ).reset_index()
+
+    print(f"Hospitalizations with measured baseline: {len(measured_baseline):,}")
+
+    # Merge measured baseline with cohort
+    cohort_with_baseline = pd.merge(
+        cohort_with_cdiff,
+        measured_baseline,
+        on='hospitalization_id',
+        how='left'
+    )
+
+    # Estimated baseline formula function
+    def estimate_baseline_cr(row):
+        cr_est = 0.74
+        if str(row['sex_category']).lower() == 'female':
+            cr_est -= 0.2
+        race = str(row['race_category']).lower() if pd.notna(row['race_category']) else ''
+        if 'black' in race or 'african' in race:
+            cr_est += 0.08
+        if pd.notna(row['age_at_admission']):
+            cr_est += 0.003 * row['age_at_admission']
+        return cr_est
+
+    # Calculate estimated baseline for all
+    cohort_with_baseline['cr_baseline_estimated'] = cohort_with_baseline.apply(estimate_baseline_cr, axis=1)
+
+    # Use measured if available, otherwise estimated
+    cohort_with_baseline['cr_baseline'] = cohort_with_baseline['cr_baseline_measured'].fillna(
+        cohort_with_baseline['cr_baseline_estimated']
+    )
+
+    # Track baseline source
+    cohort_with_baseline['cr_baseline_source'] = cohort_with_baseline['cr_baseline_measured'].apply(
+        lambda x: 'measured' if pd.notna(x) else 'estimated'
+    )
+
+    # Summary
+    n_measured = (cohort_with_baseline['cr_baseline_source'] == 'measured').sum()
+    n_estimated = (cohort_with_baseline['cr_baseline_source'] == 'estimated').sum()
+    print(f"\nBaseline creatinine source:")
+    print(f"  Measured (12-month min): {n_measured:,} ({100*n_measured/len(cohort_with_baseline):.1f}%)")
+    print(f"  Estimated (formula): {n_estimated:,} ({100*n_estimated/len(cohort_with_baseline):.1f}%)")
+    print(f"\nBaseline creatinine statistics:")
+    print(f"  Mean: {cohort_with_baseline['cr_baseline'].mean():.3f} mg/dL")
+    print(f"  Median: {cohort_with_baseline['cr_baseline'].median():.3f} mg/dL")
+    return (cohort_with_baseline,)
+
+
+@app.cell
+def _(Labs, apply_outlier_handling, cohort_with_baseline):
+    # Load creatinine for AKI window (ICU stay only)
+    print("\n=== Loading AKI Window Creatinine (ICU stay only) ===")
+
+    cohort_hosp_ids_aki = cohort_with_baseline['hospitalization_id'].astype(str).unique().tolist()
+
+    aki_cr_table = Labs.from_file(
+        config_path='clif_config.json',
+        filters={
+            'hospitalization_id': cohort_hosp_ids_aki,
+            'lab_category': ['creatinine']
+        },
+        columns=['hospitalization_id', 'lab_result_dttm', 'lab_category', 'lab_value_numeric']
+    )
+
+    apply_outlier_handling(aki_cr_table)
+    aki_cr_df = aki_cr_table.df.copy()
+    print(f"Creatinine labs loaded: {len(aki_cr_df):,} records")
+    return (aki_cr_df,)
+
+
+@app.cell
+def _(aki_cr_df, cohort_with_baseline, pd):
+    # Filter creatinine to AKI window (ICU stay: start_dttm to end_dttm)
+    print("Filtering creatinine to AKI window (ICU stay only)...")
+
+    aki_cr_with_windows = pd.merge(
+        aki_cr_df,
+        cohort_with_baseline[['hospitalization_id', 'start_dttm', 'end_dttm']],
+        on='hospitalization_id',
+        how='inner'
+    )
+
+    aki_cr_with_windows['lab_result_dttm'] = pd.to_datetime(aki_cr_with_windows['lab_result_dttm'])
+
+    # Filter: ICU admission to ICU discharge
+    aki_window_cr = aki_cr_with_windows[
+        (aki_cr_with_windows['lab_result_dttm'] >= aki_cr_with_windows['start_dttm']) &
+        (aki_cr_with_windows['lab_result_dttm'] <= aki_cr_with_windows['end_dttm'])
+    ].copy()
+
+    print(f"Creatinine records in ICU stay: {len(aki_window_cr):,}")
+
+    # Get highest creatinine per hospitalization
+    aki_cr_summary = aki_window_cr.groupby('hospitalization_id').agg(
+        cr_highest_icu=('lab_value_numeric', 'max')
+    ).reset_index()
+
+    # Track hospitalizations with missing creatinine in AKI window
+    hosp_with_cr = set(aki_cr_summary['hospitalization_id'].unique())
+    hosp_total = set(cohort_with_baseline['hospitalization_id'].unique())
+    hosp_missing_cr = hosp_total - hosp_with_cr
+
+    print(f"Hospitalizations with ICU creatinine: {len(aki_cr_summary):,}")
+    print(f"Hospitalizations MISSING creatinine in ICU: {len(hosp_missing_cr):,} ({100*len(hosp_missing_cr)/len(hosp_total):.1f}%)")
+    return (aki_cr_summary,)
+
+
+@app.cell
+def _(aki_cr_summary, cohort_with_baseline, hosp_df, hosp_dx_df, pd):
+    # Merge AKI window creatinine with cohort
+    cohort_with_aki_cr = pd.merge(
+        cohort_with_baseline,
+        aki_cr_summary,
+        on='hospitalization_id',
+        how='left'
+    )
+
+    # Calculate creatinine ratio and increase (using highest ICU creatinine)
+    cohort_with_aki_cr['cr_ratio'] = (
+        cohort_with_aki_cr['cr_highest_icu'] / cohort_with_aki_cr['cr_baseline']
+    )
+    cohort_with_aki_cr['cr_increase'] = (
+        cohort_with_aki_cr['cr_highest_icu'] - cohort_with_aki_cr['cr_baseline']
+    )
+
+    # ESRD identification from prior hospitalizations
+    ESRD_ICD10_CODES = ['I12.0', 'I13.11', 'I13.2', 'I27.2', 'N18.6', 'Z49.01', 'Z49.31']
+
+    def get_prior_esrd_status(cohort_df, hosp_df, hosp_dx_df):
+        """
+        For each hospitalization in cohort, check if patient had ESRD diagnosis
+        in any PRIOR hospitalization (not including current).
+        """
+        # Merge diagnosis codes with hospitalization dates
+        dx_with_dates = hosp_dx_df.merge(
+            hosp_df[['hospitalization_id', 'patient_id', 'admission_dttm']],
+            on='hospitalization_id',
+            how='left'
+        )
+
+        # Filter for ESRD codes only
+        esrd_dx = dx_with_dates[dx_with_dates['diagnosis_code'].isin(ESRD_ICD10_CODES)]
+
+        # For each row in cohort, check for prior ESRD
+        def check_prior_esrd(row):
+            prior = esrd_dx[
+                (esrd_dx['patient_id'] == row['patient_id']) &
+                (esrd_dx['admission_dttm'] < row['admission_dttm'])
+            ]
+            return len(prior) > 0
+
+        return cohort_df.apply(check_prior_esrd, axis=1)
+
+    # Add ESRD status based on prior hospitalizations
+    cohort_with_aki_cr['has_prior_esrd'] = get_prior_esrd_status(
+        cohort_with_aki_cr, hosp_df, hosp_dx_df
+    )
+    esrd_count = cohort_with_aki_cr['has_prior_esrd'].sum()
+    print(f"\nESRD patients (from prior hospitalizations): {esrd_count:,} ({100*esrd_count/len(cohort_with_aki_cr):.1f}%)")
+
+    # Calculate AKI stage (ACORN JAMA 2024 definition)
+    # ESRD patients: only stage 0 (alive) or 4 (death)
+    def calculate_aki_stage(row):
+        # ESRD patients: only stage 0 (alive) or 4 (death)
+        if row.get('has_prior_esrd', False):
+            if row['icu_mortality'] == 1:
+                return 4
+            return 0
+
+        # Stage 4: Death in ICU (non-ESRD patients)
+        if row['icu_mortality'] == 1:
+            return 4
+
+        cr_ratio = row['cr_ratio'] if pd.notna(row['cr_ratio']) else 0
+        cr_increase = row['cr_increase'] if pd.notna(row['cr_increase']) else 0
+        cr_highest = row['cr_highest_icu'] if pd.notna(row['cr_highest_icu']) else 0
+        crrt_flow = row['crrt_with_flow'] if pd.notna(row['crrt_with_flow']) else 0
+
+        # Stage 3: cr >= 3.0x baseline OR cr >= 4.0 mg/dL OR new CRRT with blood flow > 0
+        if cr_ratio >= 3.0 or cr_highest >= 4.0 or crrt_flow == 1:
+            return 3
+
+        # Stage 2: cr 2.0-2.9x baseline
+        if cr_ratio >= 2.0:
+            return 2
+
+        # Stage 1: cr 1.5-1.9x baseline OR increase >= 0.3 mg/dL
+        if cr_ratio >= 1.5 or cr_increase >= 0.3:
+            return 1
+
+        # Stage 0: No AKI
+        return 0
+
+    cohort_with_aki_cr['aki_stage'] = cohort_with_aki_cr.apply(calculate_aki_stage, axis=1)
+
+    print("\n=== AKI Stage Distribution ===")
+    _aki_counts = cohort_with_aki_cr['aki_stage'].value_counts().sort_index()
+    for _stage, _count in _aki_counts.items():
+        _pct = 100 * _count / len(cohort_with_aki_cr)
+        print(f"  Stage {_stage}: {_count:,} ({_pct:.1f}%)")
+
+    # Show ESRD-specific breakdown
+    print("\n=== AKI Stage by ESRD Status ===")
+    print("Non-ESRD patients:")
+    non_esrd = cohort_with_aki_cr[~cohort_with_aki_cr['has_prior_esrd']]
+    for _stage, _count in non_esrd['aki_stage'].value_counts().sort_index().items():
+        _pct = 100 * _count / len(non_esrd)
+        print(f"  Stage {_stage}: {_count:,} ({_pct:.1f}%)")
+    print("ESRD patients:")
+    esrd = cohort_with_aki_cr[cohort_with_aki_cr['has_prior_esrd']]
+    if len(esrd) > 0:
+        for _stage, _count in esrd['aki_stage'].value_counts().sort_index().items():
+            _pct = 100 * _count / len(esrd)
+            print(f"  Stage {_stage}: {_count:,} ({_pct:.1f}%)")
+    else:
+        print("  No ESRD patients in cohort")
+    return (cohort_with_aki_cr,)
 
 
 @app.cell
@@ -1006,38 +1812,34 @@ def _(ClifOrchestrator):
 
 
 @app.cell
-def _(cohort_final_with_crrt, pd):
-    # Prepare cohort for SOFA computation (first 24 hours of ICU stay only)
-    print("Preparing cohort for SOFA score computation (first 24 hours)...")
-
-    # Calculate end_time as start + 24 hours, but cap at actual ICU discharge
-    sofa_end_time = pd.Series([
-        min(start + pd.Timedelta(hours=24), end)
-        for start, end in zip(
-            cohort_final_with_crrt['start_dttm'],
-            cohort_final_with_crrt['end_dttm']
-        )
-    ])
+def _(cohort_with_aki_cr, pd):
+    # Prepare cohort for SOFA computation (whole ICU stay)
+    print("Preparing cohort for SOFA score computation (whole ICU stay)...")
 
     sofa_cohort_df = pd.DataFrame({
-        'hospitalization_id': cohort_final_with_crrt['hospitalization_id'],
-        'start_time': cohort_final_with_crrt['start_dttm'],
-        'end_time': sofa_end_time
+        'hospitalization_id': cohort_with_aki_cr['hospitalization_id'],
+        'start_time': cohort_with_aki_cr['start_dttm'],
+        'end_time': cohort_with_aki_cr['end_dttm']
     })
 
-    print(f"SOFA cohort prepared: {len(sofa_cohort_df):,} hospitalizations (first 24h window)")
+    print(f"SOFA cohort prepared: {len(sofa_cohort_df):,} hospitalizations (whole ICU stay window)")
     return (sofa_cohort_df,)
 
 
 @app.cell
-def _(cohort_final_with_crrt):
+def _(cohort_with_aki_cr):
     # Extract hospitalization IDs for SOFA table filtering
     print("Extracting hospitalization IDs for SOFA data filtering...")
 
-    sofa_cohort_ids = cohort_final_with_crrt['hospitalization_id'].astype(str).unique().tolist()
+    sofa_cohort_ids = cohort_with_aki_cr['hospitalization_id'].astype(str).unique().tolist()
 
     print(f"Extracted {len(sofa_cohort_ids):,} hospitalization IDs")
     return (sofa_cohort_ids,)
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
@@ -1106,18 +1908,18 @@ def _(co_sofa):
     # Clean medication data (remove null/NaN med_dose and med_dose_unit)
     print("Cleaning medication data...")
 
-    med_df = co_sofa.medication_admin_continuous.df.copy()
-    initial_count = len(med_df)
+    med_df_sofa = co_sofa.medication_admin_continuous.df.copy()
+    initial_count = len(med_df_sofa)
 
     # Remove null med_dose
-    med_df = med_df[med_df['med_dose'].notna()]
+    med_df_sofa = med_df_sofa[med_df_sofa['med_dose'].notna()]
     # Remove null med_dose_unit
-    med_df = med_df[med_df['med_dose_unit'].notna()]
+    med_df_sofa = med_df_sofa[med_df_sofa['med_dose_unit'].notna()]
     # Remove 'nan' string values
-    med_df = med_df[~med_df['med_dose_unit'].astype(str).str.lower().isin(['nan', 'none', ''])]
+    med_df_sofa = med_df_sofa[~med_df_sofa['med_dose_unit'].astype(str).str.lower().isin(['nan', 'none', ''])]
 
-    final_count = len(med_df)
-    co_sofa.medication_admin_continuous.df = med_df
+    final_count = len(med_df_sofa)
+    co_sofa.medication_admin_continuous.df = med_df_sofa
 
     print(f"Medication data cleaned: {initial_count:,} → {final_count:,} records ({initial_count - final_count:,} removed)")
     return
@@ -1217,12 +2019,12 @@ def _(co_sofa, pd):
 
 
 @app.cell
-def _(bmi_final, cohort_final_with_crrt, pd, sofa_scores):
+def _(bmi_final, cohort_with_aki_cr, pd, sofa_scores):
     # Merge SOFA scores and BMI with cohort
     print("Merging SOFA scores with cohort...")
 
     cohort_with_sofa_temp = pd.merge(
-        cohort_final_with_crrt,
+        cohort_with_aki_cr,
         sofa_scores,
         on='hospitalization_id',
         how='left'
@@ -1369,13 +2171,43 @@ def _(cohort_with_sofa):
         print(f"Mean SOFA: {cohort_with_sofa['sofa_total'].mean():.2f}")
         print(f"Median SOFA: {cohort_with_sofa['sofa_total'].median():.2f}")
         print(f"Missing SOFA: {cohort_with_sofa['sofa_total'].isna().sum():,} ({cohort_with_sofa['sofa_total'].isna().mean()*100:.1f}%)")
-    return
 
+    print("\n=== AKI Staging (ACORN JAMA 2024) ===")
+    if 'aki_stage' in cohort_with_sofa.columns:
+        print("AKI Stage Distribution:")
+        _stage_desc = {0: 'No AKI', 1: 'Stage 1', 2: 'Stage 2', 3: 'Stage 3', 4: 'Death in ICU'}
+        _aki_summary = cohort_with_sofa['aki_stage'].value_counts().sort_index()
+        for _s, _cnt in _aki_summary.items():
+            _p = 100 * _cnt / len(cohort_with_sofa)
+            print(f"  {_stage_desc[_s]}: {_cnt:,} ({_p:.1f}%)")
 
-@app.cell
-def _():
-    # Display cohort table
-    #cohort_final_with_resp
+        print("\nBaseline Creatinine (12-month min before ED, or estimated):")
+        if 'cr_baseline_source' in cohort_with_sofa.columns:
+            _n_measured = (cohort_with_sofa['cr_baseline_source'] == 'measured').sum()
+            _n_estimated = (cohort_with_sofa['cr_baseline_source'] == 'estimated').sum()
+            print(f"  Measured (12-month min before ED): {_n_measured:,} ({100*_n_measured/len(cohort_with_sofa):.1f}%)")
+            print(f"  Estimated (formula): {_n_estimated:,} ({100*_n_estimated/len(cohort_with_sofa):.1f}%)")
+        print(f"  Mean: {cohort_with_sofa['cr_baseline'].mean():.3f} mg/dL")
+        print(f"  Median: {cohort_with_sofa['cr_baseline'].median():.3f} mg/dL")
+
+        print("\nHighest Creatinine (ICU stay only):")
+        print(f"  Mean: {cohort_with_sofa['cr_highest_icu'].mean():.2f} mg/dL")
+        print(f"  Median: {cohort_with_sofa['cr_highest_icu'].median():.2f} mg/dL")
+        _n_missing_cr = cohort_with_sofa['cr_highest_icu'].isna().sum()
+        print(f"  Missing: {_n_missing_cr:,} ({100*_n_missing_cr/len(cohort_with_sofa):.1f}%)")
+
+    print("\n=== C. difficile Infection ===")
+    if 'cdiff_positive' in cohort_with_sofa.columns:
+        _cdiff_pos = (cohort_with_sofa['cdiff_positive'] == 1).sum()
+        _cdiff_neg = (cohort_with_sofa['cdiff_positive'] == 0).sum()
+        _cdiff_pct = 100 * _cdiff_pos / len(cohort_with_sofa)
+        print(f"C. diff positive: {_cdiff_pos:,} ({_cdiff_pct:.2f}%)")
+        print(f"C. diff negative: {_cdiff_neg:,} ({100 - _cdiff_pct:.2f}%)")
+
+    # Show hospital_type distribution if available
+    if 'hospital_type' in cohort_with_sofa.columns:
+        print(f"\n=== Hospital Type Distribution ===")
+        print(cohort_with_sofa['hospital_type'].value_counts())
     return
 
 
@@ -1386,10 +2218,7 @@ def _(mo):
 
 
 @app.cell
-def _(cohort_with_sofa):
-    import os
-    from pathlib import Path
-
+def _(Path, cohort_with_sofa):
     # Create PHI_DATA directory using Python
     phi_data_dir = Path('PHI_DATA')
     phi_data_dir.mkdir(exist_ok=True)
@@ -1403,6 +2232,12 @@ def _(cohort_with_sofa):
     print(f"Rows: {len(cohort_with_sofa):,}")
     print(f"Columns: {len(cohort_with_sofa.columns)}")
     print(f"File size: {output_path.stat().st_size / (1024**2):.2f} MB")
+    return
+
+
+@app.cell
+def _(cohort_with_sofa):
+    cohort_with_sofa
     return
 
 

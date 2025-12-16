@@ -1344,6 +1344,225 @@ def _(daily_asc_patient_level, pl, windows_pl):
 
 @app.cell(hide_code=True)
 def _(mo):
+    mo.md(
+        r"""
+    ## Calculate C. diff Requiring Treatment Flag
+
+    ### Definition
+    **Rate of C. diff** = hospitalization_id with clostridium difficile infection requiring start of treatment in ICU
+
+    ### Criteria (ALL must be met)
+    1. **Positive C. diff test**: `clostridium_difficile` detected in non-culture micro, not duplicate within last 14 days
+    2. **Treatment course**: Oral vancomycin OR oral fidaxomicin for >10 **consecutive** days
+    3. **Timing**: Treatment can start 72 hours before OR after the C. diff result time
+    4. **Treatment window**: Count consecutive days from C. diff positive test to hospital discharge
+    5. **Location**: Treatment must START in ICU (okay to complete after leaving ICU)
+    """
+    )
+    return
+
+
+@app.cell
+def _(MedicationAdminIntermittent, cohort_with_comorbidity):
+    # Load oral vancomycin/fidaxomicin for C. diff treatment
+    print("\n=== Loading Oral Vancomycin/Fidaxomicin for C. diff Treatment ===")
+
+    cohort_ids_cdiff = cohort_with_comorbidity['hospitalization_id'].astype(str).unique().tolist()
+
+    cdiff_meds_table = MedicationAdminIntermittent.from_file(
+        config_path='clif_config.json',
+        filters={
+            'hospitalization_id': cohort_ids_cdiff,
+            'med_category': ['vancomycin', 'fidaxomicin'],
+            'med_route_category': ['enteral']  # Oral route only
+        },
+        columns=[
+            'hospitalization_id',
+            'admin_dttm',
+            'med_category',
+            'med_route_category',
+            'med_dose'
+        ]
+    )
+
+    cdiff_meds_df = cdiff_meds_table.df.copy()
+
+    # Strip timezone info
+    if len(cdiff_meds_df) > 0:
+        cdiff_meds_df['admin_dttm'] = cdiff_meds_df['admin_dttm'].dt.tz_localize(None)
+
+    print(f"Oral vancomycin/fidaxomicin loaded: {len(cdiff_meds_df):,} records")
+    print(f"  Unique hospitalizations: {cdiff_meds_df['hospitalization_id'].nunique():,}")
+    print(f"  Vancomycin: {(cdiff_meds_df['med_category'] == 'vancomycin').sum():,}")
+    print(f"  Fidaxomicin: {(cdiff_meds_df['med_category'] == 'fidaxomicin').sum():,}")
+    return (cdiff_meds_df,)
+
+
+@app.cell
+def _(cohort_df):
+    cohort_df
+    return
+
+
+@app.cell
+def _(cdiff_positive_hosps):
+    cdiff_positive_hosps
+    return
+
+
+@app.cell
+def _(cdiff_meds_df, cohort_with_comorbidity, pd):
+    # Calculate C. diff requiring treatment flag
+    print("\n=== Calculating C. diff Requiring Treatment Flag ===")
+
+    def count_consecutive_days(admin_dates):
+        """Count max consecutive calendar days with medication."""
+        if len(admin_dates) == 0:
+            return 0
+
+        # Get unique calendar dates, sorted
+        unique_dates = sorted(set(d.date() for d in admin_dates))
+
+        if len(unique_dates) == 0:
+            return 0
+
+        max_consecutive = 1
+        current_consecutive = 1
+
+        for i in range(1, len(unique_dates)):
+            # Check if consecutive day
+            if (unique_dates[i] - unique_dates[i-1]).days == 1:
+                current_consecutive += 1
+                max_consecutive = max(max_consecutive, current_consecutive)
+            else:
+                current_consecutive = 1
+
+        return max_consecutive
+
+    # Get cohort with C. diff positive test info
+    # Handle backward compatibility: use cdiff_first_collect_dttm if available, else cdiff_first_positive_dttm
+    cdiff_time_col = 'cdiff_first_collect_dttm' if 'cdiff_first_collect_dttm' in cohort_with_comorbidity.columns else 'cdiff_first_positive_dttm'
+
+    cohort_cdiff = cohort_with_comorbidity[
+        ['hospitalization_id', 'start_dttm', 'end_dttm', 'discharge_dttm',
+         'cdiff_positive', cdiff_time_col]
+    ].copy()
+
+    # Rename to consistent column name for processing
+    cohort_cdiff = cohort_cdiff.rename(columns={cdiff_time_col: 'cdiff_first_dttm'})
+
+    # Ensure datetime columns are timezone-naive for consistent comparisons
+    cohort_cdiff['start_dttm'] = pd.to_datetime(cohort_cdiff['start_dttm']).dt.tz_localize(None)
+    cohort_cdiff['end_dttm'] = pd.to_datetime(cohort_cdiff['end_dttm']).dt.tz_localize(None)
+    cohort_cdiff['discharge_dttm'] = pd.to_datetime(cohort_cdiff['discharge_dttm']).dt.tz_localize(None)
+    cohort_cdiff['cdiff_first_dttm'] = pd.to_datetime(cohort_cdiff['cdiff_first_dttm']).dt.tz_localize(None)
+
+    # Filter to hospitalizations with C. diff positive
+    cdiff_positive_hosps = cohort_cdiff[cohort_cdiff['cdiff_positive'] == 1].copy()
+    print(f"Hospitalizations with C. diff positive: {len(cdiff_positive_hosps):,}")
+
+    results = []
+
+    for _, cdiff_row in cdiff_positive_hosps.iterrows():
+        hosp_id = cdiff_row['hospitalization_id']
+        cdiff_time = cdiff_row['cdiff_first_dttm']
+        icu_start = cdiff_row['start_dttm']
+        icu_end = cdiff_row['end_dttm']
+        discharge = cdiff_row['discharge_dttm']
+
+        # Skip if missing C. diff time
+        if pd.isna(cdiff_time):
+            continue
+
+        # Get oral treatment meds for this hospitalization
+        hosp_meds = cdiff_meds_df[cdiff_meds_df['hospitalization_id'] == hosp_id].copy()
+
+        if len(hosp_meds) == 0:
+            continue
+
+        # 72-hour window around C. diff positive test
+        window_start = cdiff_time - pd.Timedelta(hours=72)
+        window_end = cdiff_time + pd.Timedelta(hours=72)
+
+        # Find first treatment dose
+        first_dose_time = hosp_meds['admin_dttm'].min()
+
+        # Check if treatment started within 72-hour window of C. diff test
+        # Note: Treatment CAN start before ICU admission
+        treatment_started_near_test = window_start <= first_dose_time <= window_end
+
+        if not treatment_started_near_test:
+            continue
+
+        # Count consecutive days from C. diff positive to discharge
+        treatment_window_meds = hosp_meds[
+            (hosp_meds['admin_dttm'] >= cdiff_time) &
+            (hosp_meds['admin_dttm'] <= discharge)
+        ]
+
+        consecutive_days = count_consecutive_days(treatment_window_meds['admin_dttm'])
+
+        if consecutive_days > 10:
+            # Treatment start date = earlier of C. diff collection date or first medication dose
+            treatment_start_date = min(cdiff_time, first_dose_time)
+
+            results.append({
+                'hospitalization_id': hosp_id,
+                'cdiff_requiring_treatment': 1,
+                'cdiff_treatment_consecutive_days': consecutive_days,
+                'cdiff_treatment_first_dose_dttm': first_dose_time,
+                'cdiff_treatment_start_date': treatment_start_date
+            })
+
+    # Create summary DataFrame
+    if len(results) > 0:
+        cdiff_treatment_df = pd.DataFrame(results)
+    else:
+        cdiff_treatment_df = pd.DataFrame(columns=[
+            'hospitalization_id', 'cdiff_requiring_treatment',
+            'cdiff_treatment_consecutive_days', 'cdiff_treatment_first_dose_dttm',
+            'cdiff_treatment_start_date'
+        ])
+
+    print(f"Hospitalizations meeting C. diff treatment criteria: {len(cdiff_treatment_df):,}")
+    return cdiff_positive_hosps, cdiff_treatment_df
+
+
+@app.cell
+def _(cdiff_treatment_df, cohort_with_comorbidity, pd):
+    # Merge C. diff treatment flag with cohort
+    print("\n=== Merging C. diff Treatment Flag with Cohort ===")
+
+    cohort_with_cdiff_treatment = pd.merge(
+        cohort_with_comorbidity,
+        cdiff_treatment_df[['hospitalization_id', 'cdiff_requiring_treatment',
+                           'cdiff_treatment_consecutive_days', 'cdiff_treatment_first_dose_dttm',
+                           'cdiff_treatment_start_date']],
+        on='hospitalization_id',
+        how='left'
+    )
+
+    # Fill NaN with 0 for the flag
+    cohort_with_cdiff_treatment['cdiff_requiring_treatment'] = (
+        cohort_with_cdiff_treatment['cdiff_requiring_treatment'].fillna(0).astype(int)
+    )
+
+    # Calculate rate
+    cdiff_total_hosps = len(cohort_with_cdiff_treatment)
+    cdiff_positive_count = (cohort_with_cdiff_treatment['cdiff_positive'] == 1).sum()
+    cdiff_treatment_count = (cohort_with_cdiff_treatment['cdiff_requiring_treatment'] == 1).sum()
+
+    print(f"Total hospitalizations: {cdiff_total_hosps:,}")
+    print(f"C. diff positive: {cdiff_positive_count:,} ({100*cdiff_positive_count/cdiff_total_hosps:.2f}%)")
+    print(f"C. diff requiring treatment: {cdiff_treatment_count:,} ({100*cdiff_treatment_count/cdiff_total_hosps:.2f}%)")
+
+    if cdiff_positive_count > 0:
+        print(f"  Treatment rate among C. diff positive: {100*cdiff_treatment_count/cdiff_positive_count:.1f}%")
+    return (cohort_with_cdiff_treatment,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
     mo.md(r"""## Save Results""")
     return
 
@@ -1354,6 +1573,8 @@ def _(
     afd_patient_level,
     afd_summary,
     asc_by_year_summary,
+    cdiff_treatment_df,
+    cohort_with_cdiff_treatment,
     daily_asc_patient_level,
     daily_asc_summary,
     dasc_by_year,
@@ -1474,6 +1695,39 @@ def _(
     asc_by_year_summary_with_site.write_csv(Path('RESULTS_UPLOAD_ME') / 'asc_by_year_summary.csv')
     print(f"   Saved: RESULTS_UPLOAD_ME/asc_by_year_summary.csv")
     print(f"   Shape: {asc_by_year_summary_with_site.shape}")
+
+    # Save C. diff requiring treatment summary
+    print("\n11. C. diff requiring treatment summary:")
+    save_total_hosps = len(cohort_with_cdiff_treatment)
+    cdiff_positive_n = (cohort_with_cdiff_treatment['cdiff_positive'] == 1).sum()
+    cdiff_treatment_n = (cohort_with_cdiff_treatment['cdiff_requiring_treatment'] == 1).sum()
+
+    cdiff_summary_data = {
+        'site': [site_name],
+        'total_hospitalizations': [save_total_hosps],
+        'cdiff_positive_n': [cdiff_positive_n],
+        'cdiff_positive_pct': [100 * cdiff_positive_n / save_total_hosps if save_total_hosps > 0 else 0],
+        'cdiff_requiring_treatment_n': [cdiff_treatment_n],
+        'cdiff_requiring_treatment_pct': [100 * cdiff_treatment_n / save_total_hosps if save_total_hosps > 0 else 0],
+        'cdiff_treatment_rate_among_positive_pct': [100 * cdiff_treatment_n / cdiff_positive_n if cdiff_positive_n > 0 else 0]
+    }
+    cdiff_summary_pl = pl.DataFrame(cdiff_summary_data)
+    cdiff_summary_pl.write_csv(Path('RESULTS_UPLOAD_ME') / 'cdiff_treatment_summary.csv')
+    print(f"   Saved: RESULTS_UPLOAD_ME/cdiff_treatment_summary.csv")
+    print(f"   Shape: {cdiff_summary_pl.shape}")
+
+    # Save C. diff patient-level data (PHI)
+    print("\n12. C. diff treatment patient-level (PHI):")
+    if len(cdiff_treatment_df) > 0:
+        cdiff_treatment_with_site = cdiff_treatment_df.copy()
+        cdiff_treatment_with_site['site'] = site_name
+        cdiff_treatment_pl = pl.DataFrame(cdiff_treatment_with_site)
+        cdiff_treatment_pl = cdiff_treatment_pl.select(['site'] + [col for col in cdiff_treatment_pl.columns if col != 'site'])
+        cdiff_treatment_pl.write_parquet(Path('PHI_DATA') / 'cdiff_treatment_patient_level.parquet')
+        print(f"   Saved: PHI_DATA/cdiff_treatment_patient_level.parquet")
+        print(f"   Shape: {cdiff_treatment_pl.shape}")
+    else:
+        print(f"   No C. diff treatment cases to save")
 
     print(f"\nAll results saved successfully!")
     print(f"\n{'='*80}")
