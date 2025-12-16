@@ -38,6 +38,7 @@ from typing import List, Optional
 
 # clifpy imports
 from clifpy.tables import (
+    Adt,
     Hospitalization,
     Patient,
     Labs,
@@ -77,6 +78,11 @@ QAD_WINDOW_END = 6  # days relative to blood culture
 
 # CDC Page 5: "At least 4 Qualifying Antimicrobial Days (QAD)"
 MIN_QAD = 4
+
+# CDC Page 9: Repeat Infection Timeframe
+# "The repeat infection timeframe (RIT) is a timeframe after an ASE or BSE onset
+#  date when no new events are counted... An RIT of 14 days is used [by NHSN]"
+RIT_DAYS = 14
 
 # Outlier thresholds for lab values
 OUTLIERS = {
@@ -119,6 +125,10 @@ def _load_clif_tables(
         filters={"hospitalization_id": hospitalization_ids},
     )
     con.register("hospitalization", hosp_table.df)
+
+    # Set DuckDB timezone to match site timezone (prevents timezone shifts)
+    timezone = hosp_table.timezone
+    con.execute(f"SET timezone = '{timezone}'")
 
     # Load patient table - get patient_ids from hospitalization
     patient_ids = hosp_table.df["patient_id"].unique().tolist()
@@ -179,6 +189,14 @@ def _load_clif_tables(
     )
     con.register("diagnosis", dx_table.df)
 
+    # Load ADT table (for OR/procedural location exclusion per CDC Appendix B)
+    adt_table = Adt.from_file(
+        config_path=config_path,
+        filters={"hospitalization_id": hospitalization_ids},
+        columns=["hospitalization_id", "in_dttm", "out_dttm", "location_category"],
+    )
+    con.register("adt", adt_table.df)
+
     return con
 
 
@@ -187,11 +205,9 @@ def _load_clif_tables(
 # =============================================================================
 
 
-def _get_blood_cultures(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+def _get_blood_cultures(con: duckdb.DuckDBPyConnection, rit_days: int = 14) -> pd.DataFrame:
     """
-    Get blood cultures and identify the earliest blood culture per hospitalization.
-
-    Returns earliest blood culture regardless of admission timing (full hospitalization).
+    Get ALL blood cultures per hospitalization with episode numbering.
 
     CDC Definition (Page 6):
         "Qualifying cultures include those drawn for bacterial (aerobic and/or
@@ -199,32 +215,99 @@ def _get_blood_cultures(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         for specific viruses (e.g., cytomegalovirus) are excluded. For ASE, blood
         cultures merely need to have been drawn, regardless of result."
 
+        "Multiple window periods during a hospitalization are possible. If multiple
+        blood cultures are obtained in a short period of time, window periods may
+        overlap."
+
+    CDC Definition (Page 9 - Repeat Infection Timeframe):
+        "The repeat infection timeframe (RIT) is a timeframe after an ASE or BSE
+        onset date when no new events are counted, in order to minimize the chance
+        a single, prolonged episode of ASE or BSE is counted twice."
+        "An RIT of 14 days is used [by NHSN]."
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        DuckDB connection with loaded tables
+    rit_days : int, default 14
+        Repeat Infection Timeframe in days. Blood cultures within this window
+        are considered part of the same episode.
+
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: hospitalization_id, blood_culture_dttm, admission_dttm
+        DataFrame with columns:
+        - hospitalization_id
+        - blood_culture_dttm
+        - episode_id (1, 2, 3... per hospitalization)
+        - admission_dttm
+        - discharge_dttm
     """
-    return con.execute("""
+    return con.execute(f"""
         WITH bc AS (
             SELECT
                 m.hospitalization_id,
                 m.order_dttm as blood_culture_dttm,
                 h.admission_dttm,
-                h.discharge_dttm,
-                -- Calculate hospital day (admission = day 1)
-                DATEDIFF('day', DATE(h.admission_dttm), DATE(m.order_dttm)) + 1 as bc_hospital_day
+                h.discharge_dttm
             FROM microbiology m
             JOIN hospitalization h USING (hospitalization_id)
             WHERE m.fluid_category = 'blood_buffy'
+        ),
+        bc_with_lag AS (
+            SELECT
+                *,
+                LAG(blood_culture_dttm) OVER (
+                    PARTITION BY hospitalization_id
+                    ORDER BY blood_culture_dttm
+                ) as prev_bc_dttm
+            FROM bc
+        ),
+        bc_with_episode AS (
+            -- New episode if first BC or >{rit_days} days since previous
+            SELECT
+                *,
+                CASE
+                    WHEN prev_bc_dttm IS NULL THEN 1
+                    WHEN DATEDIFF('day', prev_bc_dttm, blood_culture_dttm) > {rit_days} THEN 1
+                    ELSE 0
+                END as is_new_episode
+            FROM bc_with_lag
         )
         SELECT
             hospitalization_id,
-            MIN(blood_culture_dttm) as blood_culture_dttm,
+            blood_culture_dttm,
+            CAST(SUM(is_new_episode) OVER (
+                PARTITION BY hospitalization_id
+                ORDER BY blood_culture_dttm
+            ) AS INTEGER) as episode_id,
             admission_dttm,
             discharge_dttm
-        FROM bc
-        GROUP BY hospitalization_id, admission_dttm, discharge_dttm
+        FROM bc_with_episode
     """).df()
+
+
+def _aggregate_to_episodes(blood_cultures: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate blood cultures to episode level (one row per episode).
+
+    Each episode uses the earliest blood culture within that episode as the
+    reference point for QAD and organ dysfunction windows.
+
+    Parameters
+    ----------
+    blood_cultures : pd.DataFrame
+        Blood cultures from _get_blood_cultures() with episode_id
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (hospitalization_id, episode_id) with earliest blood_culture_dttm
+    """
+    return blood_cultures.groupby(
+        ["hospitalization_id", "episode_id", "admission_dttm", "discharge_dttm"],
+        as_index=False,
+    ).agg({"blood_culture_dttm": "min"})
 
 
 # =============================================================================
@@ -237,7 +320,7 @@ def _calculate_qad(
     blood_cultures: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Calculate consecutive qualifying antimicrobial days (QAD).
+    Calculate consecutive qualifying antimicrobial days (QAD) per episode.
 
     CDC Definition (Page 6-7):
         "For ASE events, the first QAD is the first day in window period extending
@@ -264,12 +347,12 @@ def _calculate_qad(
     con : duckdb.DuckDBPyConnection
         DuckDB connection with loaded tables
     blood_cultures : pd.DataFrame
-        Blood culture data from _get_blood_cultures()
+        Blood culture data from _aggregate_to_episodes() with episode_id
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: hospitalization_id, total_qad, first_qad_dttm
+        DataFrame with columns: hospitalization_id, episode_id, total_qad, first_qad_dttm
     """
     # Register blood cultures as temp table
     con.register("blood_cultures_temp", blood_cultures)
@@ -279,9 +362,10 @@ def _calculate_qad(
             SELECT * FROM blood_cultures_temp
         ),
         abx_admin AS (
-            -- Get qualifying antimicrobial administrations
+            -- Get qualifying antimicrobial administrations per episode
             SELECT
                 m.hospitalization_id,
+                bc.episode_id,
                 m.admin_dttm,
                 m.med_name,
                 m.med_route_category,
@@ -290,68 +374,98 @@ def _calculate_qad(
                 -- Calculate day relative to blood culture
                 DATEDIFF('day', DATE(bc.blood_culture_dttm), DATE(m.admin_dttm)) as day_from_bc
             FROM med_intermittent m
-            JOIN bc_hosp bc USING (hospitalization_id)
+            JOIN bc_hosp bc ON m.hospitalization_id = bc.hospitalization_id
             WHERE m.med_group = 'CMS_sepsis_qualifying_antibiotics'
               AND DATEDIFF('day', DATE(bc.blood_culture_dttm), DATE(m.admin_dttm)) BETWEEN -2 AND 6
         ),
         daily_abx AS (
-            -- Aggregate to daily level - one row per hospitalization-date
+            -- Aggregate to daily level - one row per hospitalization-episode-date
             SELECT
                 hospitalization_id,
+                episode_id,
                 admin_date,
                 day_from_bc,
                 blood_culture_dttm,
                 MAX(CASE WHEN med_route_category = 'iv' THEN 1 ELSE 0 END) as has_iv,
                 MIN(admin_dttm) as first_admin_of_day
             FROM abx_admin
-            GROUP BY hospitalization_id, admin_date, day_from_bc, blood_culture_dttm
+            GROUP BY hospitalization_id, episode_id, admin_date, day_from_bc, blood_culture_dttm
         ),
-        -- Check if there's at least one IV antibiotic in the window
+        -- Check if there's at least one IV antibiotic in the window per episode
         iv_check AS (
             SELECT
                 hospitalization_id,
+                episode_id,
                 MAX(has_iv) as has_iv_in_window
             FROM daily_abx
-            GROUP BY hospitalization_id
+            GROUP BY hospitalization_id, episode_id
         ),
-        consecutive_runs AS (
-            -- Find consecutive day runs using gaps-and-islands technique
+        daily_with_gaps AS (
+            -- Calculate gaps between antibiotic days (CDC Figure 4)
+            -- Per CDC: "Antibiotic regimens that allow for 1 day between doses
+            -- (e.g., every other day dosing) can still qualify"
             SELECT
                 d.hospitalization_id,
+                d.episode_id,
                 d.admin_date,
                 d.day_from_bc,
                 d.first_admin_of_day,
-                d.day_from_bc - ROW_NUMBER() OVER (
-                    PARTITION BY d.hospitalization_id
+                d.day_from_bc - LAG(d.day_from_bc, 1) OVER (
+                    PARTITION BY d.hospitalization_id, d.episode_id
                     ORDER BY d.day_from_bc
-                ) as run_group
+                ) as gap_from_prev
             FROM daily_abx d
-            JOIN iv_check ic USING (hospitalization_id)
+            JOIN iv_check ic ON d.hospitalization_id = ic.hospitalization_id
+                            AND d.episode_id = ic.episode_id
             WHERE ic.has_iv_in_window = 1
+        ),
+        consecutive_runs AS (
+            -- Assign run groups: new group starts if gap > 2 days
+            -- Gap <= 2 means consecutive or 1-day gap (every-other-day dosing OK)
+            SELECT
+                hospitalization_id,
+                episode_id,
+                admin_date,
+                day_from_bc,
+                first_admin_of_day,
+                SUM(CASE WHEN gap_from_prev IS NULL OR gap_from_prev > 2 THEN 1 ELSE 0 END) OVER (
+                    PARTITION BY hospitalization_id, episode_id
+                    ORDER BY day_from_bc
+                    ROWS UNBOUNDED PRECEDING
+                ) as run_group
+            FROM daily_with_gaps
         ),
         run_lengths AS (
             SELECT
                 hospitalization_id,
+                episode_id,
                 run_group,
                 COUNT(*) as run_length,
                 MIN(admin_date) as first_qad_date,
+                MAX(admin_date) as last_qad_date,
                 MIN(first_admin_of_day) as first_qad_dttm
             FROM consecutive_runs
-            GROUP BY hospitalization_id, run_group
+            GROUP BY hospitalization_id, episode_id, run_group
         ),
         best_runs AS (
-            -- Get the longest run for each hospitalization
+            -- Get the longest run for each hospitalization-episode
             SELECT
                 hospitalization_id,
+                episode_id,
                 MAX(run_length) as total_qad,
-                FIRST(first_qad_dttm ORDER BY run_length DESC, first_qad_dttm) as first_qad_dttm
+                FIRST(first_qad_dttm ORDER BY run_length DESC, first_qad_dttm) as first_qad_dttm,
+                FIRST(first_qad_date ORDER BY run_length DESC, first_qad_dttm) as qad_start_date,
+                FIRST(last_qad_date ORDER BY run_length DESC, first_qad_dttm) as qad_end_date
             FROM run_lengths
-            GROUP BY hospitalization_id
+            GROUP BY hospitalization_id, episode_id
         )
         SELECT
             hospitalization_id,
+            episode_id,
             total_qad,
-            first_qad_dttm
+            first_qad_dttm,
+            qad_start_date,
+            qad_end_date
         FROM best_runs
     """).df()
 
@@ -396,7 +510,7 @@ def _get_vasopressor_dysfunction(
     blood_cultures: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Identify new vasopressor initiation within ±2 days of blood culture.
+    Identify new vasopressor initiation within ±2 days of blood culture per episode.
 
     CDC Definition (Page 5):
         "Initiation of a new vasopressor infusion (norepinephrine, dopamine,
@@ -415,7 +529,7 @@ def _get_vasopressor_dysfunction(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: hospitalization_id, vasopressor_dttm
+        DataFrame with columns: hospitalization_id, episode_id, vasopressor_dttm, vasopressor_name
     """
     # Register blood cultures as temp table
     con.register("blood_cultures_temp", blood_cultures)
@@ -427,6 +541,7 @@ def _get_vasopressor_dysfunction(
         vaso_admin AS (
             SELECT
                 m.hospitalization_id,
+                bc.episode_id,
                 m.admin_dttm,
                 m.med_name,
                 m.med_category,
@@ -437,9 +552,15 @@ def _get_vasopressor_dysfunction(
                     ORDER BY m.admin_dttm
                 ) as prev_admin_date
             FROM med_continuous m
-            JOIN bc_hosp bc USING (hospitalization_id)
+            JOIN bc_hosp bc ON m.hospitalization_id = bc.hospitalization_id
+            -- Join ADT to get patient location at time of vasopressor admin
+            LEFT JOIN adt a ON m.hospitalization_id = a.hospitalization_id
+                           AND m.admin_dttm >= a.in_dttm
+                           AND m.admin_dttm < a.out_dttm
             WHERE m.med_group = 'vasoactives'
               AND m.med_dose > 0
+              -- CDC Appendix B: Exclude vasopressors given in OR/procedural areas
+              AND (a.location_category IS NULL OR a.location_category != 'procedural')
         ),
         new_vaso_in_window AS (
             -- Only count new vasopressors (not given in prior day) within ±2 days of BC
@@ -452,9 +573,11 @@ def _get_vasopressor_dysfunction(
         )
         SELECT
             hospitalization_id,
-            MIN(admin_dttm) as vasopressor_dttm
+            episode_id,
+            MIN(admin_dttm) as vasopressor_dttm,
+            FIRST(med_category ORDER BY admin_dttm) as vasopressor_name
         FROM new_vaso_in_window
-        GROUP BY hospitalization_id
+        GROUP BY hospitalization_id, episode_id
     """).df()
 
 
@@ -468,7 +591,7 @@ def _get_imv_dysfunction(
     blood_cultures: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Identify new invasive mechanical ventilation within ±2 days of blood culture.
+    Identify new invasive mechanical ventilation within ±2 days of blood culture per episode.
 
     CDC Definition (Page 5):
         "Initiation of invasive mechanical ventilation (must be greater than 1
@@ -477,7 +600,7 @@ def _get_imv_dysfunction(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: hospitalization_id, imv_dttm
+        DataFrame with columns: hospitalization_id, episode_id, imv_dttm
     """
     # Register blood cultures as temp table
     con.register("blood_cultures_temp", blood_cultures)
@@ -489,6 +612,7 @@ def _get_imv_dysfunction(
         imv_episodes AS (
             SELECT
                 r.hospitalization_id,
+                bc.episode_id,
                 r.recorded_dttm,
                 DATE(r.recorded_dttm) as imv_date,
                 bc.blood_culture_dttm,
@@ -497,7 +621,7 @@ def _get_imv_dysfunction(
                     ORDER BY r.recorded_dttm
                 ) as prev_imv_date
             FROM respiratory r
-            JOIN bc_hosp bc USING (hospitalization_id)
+            JOIN bc_hosp bc ON r.hospitalization_id = bc.hospitalization_id
             WHERE r.device_category = 'IMV'
         ),
         new_imv_in_window AS (
@@ -511,9 +635,10 @@ def _get_imv_dysfunction(
         )
         SELECT
             hospitalization_id,
+            episode_id,
             MIN(recorded_dttm) as imv_dttm
         FROM new_imv_in_window
-        GROUP BY hospitalization_id
+        GROUP BY hospitalization_id, episode_id
     """).df()
 
 
@@ -528,7 +653,7 @@ def _get_lab_dysfunction(
     esrd_flags: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Calculate lab-based organ dysfunction criteria.
+    Calculate lab-based organ dysfunction criteria per episode.
 
     CDC Definitions (Page 5):
         AKI: "Doubling of serum creatinine OR decrease by ≥50% of estimated
@@ -561,8 +686,8 @@ def _get_lab_dysfunction(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: hospitalization_id, aki_dttm, hyperbilirubinemia_dttm,
-        thrombocytopenia_dttm, lactate_dttm
+        DataFrame with columns: hospitalization_id, episode_id, aki_dttm,
+        hyperbilirubinemia_dttm, thrombocytopenia_dttm, lactate_dttm
     """
     # Register temp tables
     con.register("blood_cultures_temp", blood_cultures)
@@ -573,9 +698,10 @@ def _get_lab_dysfunction(
             SELECT * FROM blood_cultures_temp
         ),
         labs_window AS (
-            -- Labs within ±2 days of blood culture
+            -- Labs within ±2 days of blood culture per episode
             SELECT
                 l.hospitalization_id,
+                bc.episode_id,
                 l.lab_category,
                 l.lab_value_numeric as value,
                 l.lab_result_dttm,
@@ -586,7 +712,7 @@ def _get_lab_dysfunction(
                 -- Hospital day of blood culture (to determine onset type)
                 DATEDIFF('day', DATE(bc.admission_dttm), DATE(bc.blood_culture_dttm)) + 1 as bc_hospital_day
             FROM labs l
-            JOIN bc_hosp bc USING (hospitalization_id)
+            JOIN bc_hosp bc ON l.hospitalization_id = bc.hospitalization_id
             WHERE l.lab_category IN ('creatinine', 'bilirubin_total', 'platelet_count', 'lactate')
               AND l.lab_result_dttm BETWEEN
                   bc.blood_culture_dttm - INTERVAL '2 days'
@@ -614,34 +740,39 @@ def _get_lab_dysfunction(
             FROM labs_all
             GROUP BY hospitalization_id
         ),
-        -- Hospital-onset baselines (within ±2 days of blood culture)
+        -- Hospital-onset baselines (within ±2 days of blood culture per episode)
         baseline_hospital AS (
             SELECT
                 hospitalization_id,
+                episode_id,
                 MIN(CASE WHEN lab_category = 'creatinine' AND value <= {OUTLIERS['creatinine_max']} THEN value END) as cr_baseline_ho,
                 MIN(CASE WHEN lab_category = 'bilirubin_total' AND value <= {OUTLIERS['bilirubin_max']} THEN value END) as bili_baseline_ho,
                 MAX(CASE WHEN lab_category = 'platelet_count' AND value <= {OUTLIERS['platelet_max']} AND value >= 100 THEN value END) as plt_baseline_ho
             FROM labs_window
-            GROUP BY hospitalization_id
+            GROUP BY hospitalization_id, episode_id
         ),
-        -- Get onset type per hospitalization
+        -- Get onset type per episode
         onset_type AS (
             SELECT DISTINCT
                 hospitalization_id,
+                episode_id,
                 bc_hospital_day,
                 CASE WHEN bc_hospital_day <= 2 THEN 'community' ELSE 'hospital' END as onset
             FROM labs_window
         ),
-        -- AKI detection
+        -- AKI detection per episode
         aki AS (
             SELECT
                 lw.hospitalization_id,
+                lw.episode_id,
                 MIN(lw.lab_result_dttm) as aki_dttm
             FROM labs_window lw
             LEFT JOIN baseline_community bc ON lw.hospitalization_id = bc.hospitalization_id
             LEFT JOIN baseline_hospital bh ON lw.hospitalization_id = bh.hospitalization_id
+                                          AND lw.episode_id = bh.episode_id
             LEFT JOIN esrd_temp e ON lw.hospitalization_id = e.hospitalization_id
             LEFT JOIN onset_type ot ON lw.hospitalization_id = ot.hospitalization_id
+                                   AND lw.episode_id = ot.episode_id
             WHERE lw.lab_category = 'creatinine'
               AND lw.value <= {OUTLIERS['creatinine_max']}  -- outlier filter
               AND e.esrd IS NULL  -- exclude ESRD patients
@@ -650,17 +781,20 @@ def _get_lab_dysfunction(
                   (ot.onset = 'community' AND bc.cr_baseline_co IS NOT NULL AND lw.value >= 2.0 * bc.cr_baseline_co) OR
                   (ot.onset = 'hospital' AND bh.cr_baseline_ho IS NOT NULL AND lw.value >= 2.0 * bh.cr_baseline_ho)
               )
-            GROUP BY lw.hospitalization_id
+            GROUP BY lw.hospitalization_id, lw.episode_id
         ),
-        -- Hyperbilirubinemia detection
+        -- Hyperbilirubinemia detection per episode
         hyperbili AS (
             SELECT
                 lw.hospitalization_id,
+                lw.episode_id,
                 MIN(lw.lab_result_dttm) as hyperbilirubinemia_dttm
             FROM labs_window lw
             LEFT JOIN baseline_community bc ON lw.hospitalization_id = bc.hospitalization_id
             LEFT JOIN baseline_hospital bh ON lw.hospitalization_id = bh.hospitalization_id
+                                          AND lw.episode_id = bh.episode_id
             LEFT JOIN onset_type ot ON lw.hospitalization_id = ot.hospitalization_id
+                                   AND lw.episode_id = ot.episode_id
             WHERE lw.lab_category = 'bilirubin_total'
               AND lw.value >= 2.0  -- Must be >=2.0 mg/dL
               AND lw.value <= {OUTLIERS['bilirubin_max']}  -- outlier filter
@@ -668,17 +802,20 @@ def _get_lab_dysfunction(
                   (ot.onset = 'community' AND bc.bili_baseline_co IS NOT NULL AND lw.value >= 2.0 * bc.bili_baseline_co) OR
                   (ot.onset = 'hospital' AND bh.bili_baseline_ho IS NOT NULL AND lw.value >= 2.0 * bh.bili_baseline_ho)
               )
-            GROUP BY lw.hospitalization_id
+            GROUP BY lw.hospitalization_id, lw.episode_id
         ),
-        -- Thrombocytopenia detection
+        -- Thrombocytopenia detection per episode
         thrombocytopenia AS (
             SELECT
                 lw.hospitalization_id,
+                lw.episode_id,
                 MIN(lw.lab_result_dttm) as thrombocytopenia_dttm
             FROM labs_window lw
             LEFT JOIN baseline_community bc ON lw.hospitalization_id = bc.hospitalization_id
             LEFT JOIN baseline_hospital bh ON lw.hospitalization_id = bh.hospitalization_id
+                                          AND lw.episode_id = bh.episode_id
             LEFT JOIN onset_type ot ON lw.hospitalization_id = ot.hospitalization_id
+                                   AND lw.episode_id = ot.episode_id
             WHERE lw.lab_category = 'platelet_count'
               AND lw.value < 100  -- Must be <100
               AND lw.value <= {OUTLIERS['platelet_max']}  -- outlier filter
@@ -687,31 +824,37 @@ def _get_lab_dysfunction(
                   (ot.onset = 'community' AND bc.plt_baseline_co IS NOT NULL AND bc.plt_baseline_co >= 100 AND lw.value <= 0.5 * bc.plt_baseline_co) OR
                   (ot.onset = 'hospital' AND bh.plt_baseline_ho IS NOT NULL AND bh.plt_baseline_ho >= 100 AND lw.value <= 0.5 * bh.plt_baseline_ho)
               )
-            GROUP BY lw.hospitalization_id
+            GROUP BY lw.hospitalization_id, lw.episode_id
         ),
-        -- Elevated lactate detection (no baseline required)
+        -- Elevated lactate detection per episode (no baseline required)
         lactate AS (
             SELECT
                 lw.hospitalization_id,
+                lw.episode_id,
                 MIN(lw.lab_result_dttm) as lactate_dttm
             FROM labs_window lw
             WHERE lw.lab_category = 'lactate'
               AND lw.value >= 2.0  -- Must be >=2.0 mmol/L
               AND lw.value <= {OUTLIERS['lactate_max']}  -- outlier filter
-            GROUP BY lw.hospitalization_id
+            GROUP BY lw.hospitalization_id, lw.episode_id
         )
-        -- Combine all lab dysfunction
+        -- Combine all lab dysfunction per episode
         SELECT
             bc.hospitalization_id,
+            bc.episode_id,
             aki.aki_dttm,
             hyperbili.hyperbilirubinemia_dttm,
             thrombocytopenia.thrombocytopenia_dttm,
             lactate.lactate_dttm
         FROM bc_hosp bc
         LEFT JOIN aki ON bc.hospitalization_id = aki.hospitalization_id
+                     AND bc.episode_id = aki.episode_id
         LEFT JOIN hyperbili ON bc.hospitalization_id = hyperbili.hospitalization_id
+                           AND bc.episode_id = hyperbili.episode_id
         LEFT JOIN thrombocytopenia ON bc.hospitalization_id = thrombocytopenia.hospitalization_id
+                                  AND bc.episode_id = thrombocytopenia.episode_id
         LEFT JOIN lactate ON bc.hospitalization_id = lactate.hospitalization_id
+                         AND bc.episode_id = lactate.episode_id
     """).df()
 
 
@@ -726,7 +869,7 @@ def _determine_presumed_infection(
     qad_results: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Determine presumed infection status.
+    Determine presumed infection status per episode.
 
     CDC Definition - Criteria A (Page 5):
         "Presumed Infection (presence of both 1 and 2):
@@ -743,8 +886,8 @@ def _determine_presumed_infection(
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: hospitalization_id, blood_culture_dttm, total_qad,
-        first_qad_dttm, presumed_infection
+        DataFrame with columns: hospitalization_id, episode_id, blood_culture_dttm,
+        total_qad, first_qad_dttm, qad_start_date, qad_end_date, presumed_infection
     """
     # Register temp tables
     con.register("blood_cultures_temp", blood_cultures)
@@ -778,11 +921,14 @@ def _determine_presumed_infection(
         )
         SELECT
             bc.hospitalization_id,
+            bc.episode_id,
             bc.blood_culture_dttm,
             bc.admission_dttm,
             bc.discharge_dttm,
             COALESCE(qad.total_qad, 0) as total_qad,
             qad.first_qad_dttm,
+            qad.qad_start_date,
+            qad.qad_end_date,
             CASE
                 -- Standard: >=4 QAD
                 WHEN qad.total_qad >= 4 THEN 1
@@ -796,6 +942,7 @@ def _determine_presumed_infection(
             END as presumed_infection
         FROM bc_hosp bc
         LEFT JOIN qad ON bc.hospitalization_id = qad.hospitalization_id
+                     AND bc.episode_id = qad.episode_id
         LEFT JOIN censoring c ON bc.hospitalization_id = c.hospitalization_id
     """).df()
 
@@ -813,7 +960,7 @@ def _calculate_final_ase(
     esrd_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Combine all criteria to determine final ASE status.
+    Combine all criteria to determine final ASE status per episode.
 
     CDC ASE Definition (Page 5):
         "ASE: Adult Sepsis Event
@@ -835,14 +982,15 @@ def _calculate_final_ase(
     Returns
     -------
     pd.DataFrame
-        Final ASE results with all specified columns
+        Final ASE results with all specified columns including episode_id
     """
-    # Merge all dataframes
+    # Merge all dataframes by hospitalization_id and episode_id
     result = presumed_infection.copy()
-    result = result.merge(vasopressor_df, on="hospitalization_id", how="left")
-    result = result.merge(imv_df, on="hospitalization_id", how="left")
-    result = result.merge(lab_dysfunction, on="hospitalization_id", how="left")
-    result = result.merge(esrd_df, on="hospitalization_id", how="left")
+    merge_keys = ["hospitalization_id", "episode_id"]
+    result = result.merge(vasopressor_df, on=merge_keys, how="left")
+    result = result.merge(imv_df, on=merge_keys, how="left")
+    result = result.merge(lab_dysfunction, on=merge_keys, how="left")
+    result = result.merge(esrd_df, on="hospitalization_id", how="left")  # ESRD is per hospitalization
 
     # Fill ESRD nulls with 0
     result["esrd"] = result["esrd"].fillna(0).astype(int)
@@ -883,6 +1031,26 @@ def _calculate_final_ase(
         (result["presumed_infection"] == 1)
         & (result["has_organ_dysfunction_wo_lactate"])
     ).astype(int)
+
+    # Determine reason for no sepsis (transparency column)
+    result["no_sepsis_reason"] = None
+    # Priority 1: No IV antibiotic in window
+    result.loc[
+        (result["sepsis"] == 0) & (result["total_qad"].isna() | (result["total_qad"] == 0)),
+        "no_sepsis_reason"
+    ] = "no_qualifying_antibiotics"
+    # Priority 2: Insufficient QAD (< 4 days)
+    result.loc[
+        (result["sepsis"] == 0) & (result["presumed_infection"] == 0) &
+        (result["total_qad"].notna()) & (result["total_qad"] > 0) & (result["total_qad"] < 4),
+        "no_sepsis_reason"
+    ] = "insufficient_qad"
+    # Priority 3: No organ dysfunction despite presumed infection
+    result.loc[
+        (result["sepsis"] == 0) & (result["presumed_infection"] == 1) &
+        (~result["has_organ_dysfunction_w_lactate"]),
+        "no_sepsis_reason"
+    ] = "no_organ_dysfunction"
 
     def get_earliest_and_criteria(row, include_lactate=True):
         """Get earliest datetime and corresponding criteria name for organ dysfunction only."""
@@ -986,15 +1154,22 @@ def _calculate_final_ase(
     # Select and order final columns
     final_columns = [
         "hospitalization_id",
+        "episode_id",
         "presumed_infection",
         "sepsis",
         "type",
+        "no_sepsis_reason",
+        "blood_culture_dttm",
+        "total_qad",
+        "qad_start_date",
+        "qad_end_date",
         "presumed_infection_onset_dttm",
         "ase_onset_w_lactate_dttm",
         "ase_onset_wo_lactate_dttm",
         "ase_first_criteria_w_lactate",
         "ase_first_criteria_wo_lactate",
         "vasopressor_dttm",
+        "vasopressor_name",
         "imv_dttm",
         "aki_dttm",
         "hyperbilirubinemia_dttm",
@@ -1046,6 +1221,7 @@ def _validate_results(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_ase(
     hospitalization_ids: List[str],
     config_path: str = "clif_config.json",
+    rit_days: int = 14,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -1055,12 +1231,26 @@ def calculate_ase(
     - Criteria A: Presumed Infection (blood culture + ≥4 QAD)
     - Criteria B: Organ Dysfunction within ±2 days of blood culture
 
+    Supports multiple sepsis episodes per hospitalization using the CDC
+    Repeat Infection Timeframe (RIT) to separate distinct episodes.
+
+    CDC Definition (Page 6):
+        "Multiple window periods during a hospitalization are possible."
+
+    CDC Definition (Page 9 - RIT):
+        "The repeat infection timeframe (RIT) is a timeframe after an ASE
+        onset date when no new events are counted... An RIT of 14 days is used."
+
     Parameters
     ----------
     hospitalization_ids : List[str]
         List of hospitalization IDs to evaluate
     config_path : str, default "clif_config.json"
         Path to clifpy config file
+    rit_days : int, default 14
+        Repeat Infection Timeframe in days. Blood cultures more than this
+        many days apart are considered separate episodes. Per CDC, 14 days
+        is the recommended value used by NHSN.
     verbose : bool, default True
         Print progress messages
 
@@ -1069,6 +1259,7 @@ def calculate_ase(
     pd.DataFrame
         ASE results with columns:
         - hospitalization_id: Unique encounter ID
+        - episode_id: Episode number within hospitalization (1, 2, 3...)
         - presumed_infection: 1 = met criteria, 0 = not met
         - sepsis: 1 = ASE case, 0 = not ASE
         - type: "community" or "hospital" (based on onset day)
@@ -1091,29 +1282,38 @@ def calculate_ase(
     >>> hosp_ids = ['H001', 'H002', 'H003']
     >>> results = calculate_ase(hosp_ids, config_path='clif_config.json')
     >>> results.to_parquet('output/ase_results.parquet')
+
+    Notes
+    -----
+    To get only the first episode per hospitalization (original behavior):
+        results = results[results['episode_id'] == 1]
     """
     if verbose:
         print("=== Adult Sepsis Event (ASE) Calculation ===")
         print(f"Processing {len(hospitalization_ids):,} hospitalizations...")
+        print(f"Repeat Infection Timeframe (RIT): {rit_days} days")
 
     # Step 1: Load CLIF tables
     if verbose:
         print("Loading CLIF tables...")
     con = _load_clif_tables(hospitalization_ids, config_path)
 
-    # Step 2: Get blood cultures
+    # Step 2: Get blood cultures with episode numbering
     if verbose:
         print("Identifying blood cultures...")
-    blood_cultures = _get_blood_cultures(con)
+    all_blood_cultures = _get_blood_cultures(con, rit_days=rit_days)
+    n_hosp_with_bc = all_blood_cultures["hospitalization_id"].nunique()
+    n_episodes = len(all_blood_cultures.groupby(["hospitalization_id", "episode_id"]))
     if verbose:
-        print(f"  Found blood cultures for {len(blood_cultures):,} hospitalizations")
+        print(f"  Found blood cultures for {n_hosp_with_bc:,} hospitalizations")
+        print(f"  Total episodes (using RIT={rit_days}d): {n_episodes:,}")
 
-    if len(blood_cultures) == 0:
+    if len(all_blood_cultures) == 0:
         if verbose:
             print("No blood cultures found. Returning empty results.")
         # Return empty DataFrame with correct schema
         return pd.DataFrame(columns=[
-            "hospitalization_id", "presumed_infection", "sepsis", "type",
+            "hospitalization_id", "episode_id", "presumed_infection", "sepsis", "type",
             "presumed_infection_onset_dttm", "ase_onset_w_lactate_dttm",
             "ase_onset_wo_lactate_dttm", "ase_first_criteria_w_lactate",
             "ase_first_criteria_wo_lactate", "vasopressor_dttm", "imv_dttm",
@@ -1121,13 +1321,18 @@ def calculate_ase(
             "lactate_dttm", "esrd"
         ])
 
-    # Step 3: Calculate QAD
+    # Step 2b: Aggregate to episode level (one row per episode)
+    blood_cultures = _aggregate_to_episodes(all_blood_cultures)
+    if verbose:
+        print(f"  Aggregated to {len(blood_cultures):,} unique episodes")
+
+    # Step 3: Calculate QAD per episode
     if verbose:
         print("Calculating Qualifying Antimicrobial Days (QAD)...")
     qad_results = _calculate_qad(con, blood_cultures)
     if verbose:
         qad_with_value = qad_results[qad_results["total_qad"] >= 4]
-        print(f"  {len(qad_with_value):,} hospitalizations with ≥4 QAD")
+        print(f"  {len(qad_with_value):,} episodes with ≥4 QAD")
 
     # Step 4: Get ESRD flags
     if verbose:
@@ -1142,7 +1347,7 @@ def calculate_ase(
     presumed_infection = _determine_presumed_infection(con, blood_cultures, qad_results)
     pi_count = presumed_infection["presumed_infection"].sum()
     if verbose:
-        print(f"  {pi_count:,} hospitalizations with presumed infection")
+        print(f"  {pi_count:,} episodes with presumed infection")
 
     # Step 6: Get organ dysfunction
     if verbose:
@@ -1151,12 +1356,12 @@ def calculate_ase(
     # 6a: Vasopressors
     vasopressor_df = _get_vasopressor_dysfunction(con, blood_cultures)
     if verbose:
-        print(f"  Vasopressor: {len(vasopressor_df):,} hospitalizations")
+        print(f"  Vasopressor: {len(vasopressor_df):,} episodes")
 
     # 6b: IMV
     imv_df = _get_imv_dysfunction(con, blood_cultures)
     if verbose:
-        print(f"  IMV: {len(imv_df):,} hospitalizations")
+        print(f"  IMV: {len(imv_df):,} episodes")
 
     # 6c: Lab-based dysfunction
     lab_dysfunction = _get_lab_dysfunction(con, blood_cultures, esrd_flags)
@@ -1165,10 +1370,10 @@ def calculate_ase(
     plt_count = lab_dysfunction["thrombocytopenia_dttm"].notna().sum()
     lac_count = lab_dysfunction["lactate_dttm"].notna().sum()
     if verbose:
-        print(f"  AKI: {aki_count:,} hospitalizations")
-        print(f"  Hyperbilirubinemia: {bili_count:,} hospitalizations")
-        print(f"  Thrombocytopenia: {plt_count:,} hospitalizations")
-        print(f"  Elevated Lactate: {lac_count:,} hospitalizations")
+        print(f"  AKI: {aki_count:,} episodes")
+        print(f"  Hyperbilirubinemia: {bili_count:,} episodes")
+        print(f"  Thrombocytopenia: {plt_count:,} episodes")
+        print(f"  Elevated Lactate: {lac_count:,} episodes")
 
     # Step 7: Calculate final ASE
     if verbose:
@@ -1191,12 +1396,15 @@ def calculate_ase(
         ase_count = result["sepsis"].sum()
         community_count = (result["type"] == "community").sum()
         hospital_count = (result["type"] == "hospital").sum()
+        n_hosp_with_sepsis = result[result["sepsis"] == 1]["hospitalization_id"].nunique()
         print("\n=== ASE Calculation Complete ===")
-        print(f"Total hospitalizations processed: {len(result):,}")
-        print(f"Presumed infections: {result['presumed_infection'].sum():,}")
-        print(f"ASE cases (sepsis=1): {ase_count:,}")
-        print(f"  Community-onset: {community_count:,}")
-        print(f"  Hospital-onset: {hospital_count:,}")
+        print(f"Total episodes processed: {len(result):,}")
+        print(f"Unique hospitalizations: {result['hospitalization_id'].nunique():,}")
+        print(f"Episodes with presumed infection: {result['presumed_infection'].sum():,}")
+        print(f"ASE episodes (sepsis=1): {ase_count:,}")
+        print(f"  Hospitalizations with at least one ASE: {n_hosp_with_sepsis:,}")
+        print(f"  Community-onset episodes: {community_count:,}")
+        print(f"  Hospital-onset episodes: {hospital_count:,}")
 
     # Close connection
     con.close()
@@ -1212,6 +1420,7 @@ def calculate_ase(
 def calculate_ase_from_cohort(
     cohort_path: str,
     config_path: str = "clif_config.json",
+    rit_days: int = 14,
     output_path: Optional[str] = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -1224,6 +1433,8 @@ def calculate_ase_from_cohort(
         Path to cohort parquet file (must have hospitalization_id column)
     config_path : str
         Path to clifpy config file
+    rit_days : int, default 14
+        Repeat Infection Timeframe in days
     output_path : str, optional
         If provided, save results to this path
     verbose : bool
@@ -1239,7 +1450,7 @@ def calculate_ase_from_cohort(
     hosp_ids = cohort["hospitalization_id"].astype(str).unique().tolist()
 
     # Calculate ASE
-    results = calculate_ase(hosp_ids, config_path=config_path, verbose=verbose)
+    results = calculate_ase(hosp_ids, config_path=config_path, rit_days=rit_days, verbose=verbose)
 
     # Save if output path provided
     if output_path:

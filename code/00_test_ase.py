@@ -18,6 +18,14 @@ def _(mo):
 
     This notebook tests the ASE detection module using the ICU cohort from `01_cohort.py`.
 
+    ## Multi-Episode Support (CDC Page 6)
+    > "Multiple window periods during a hospitalization are possible. If multiple
+    > blood cultures are obtained in a short period of time, window periods may overlap."
+
+    The ASE module uses a **14-day Repeat Infection Timeframe (RIT)** per CDC Page 9:
+    > "An RIT of 14 days is used [by NHSN], and may be reasonable for hospitals
+    > looking to track hospital-onset events."
+
     ## CDC ASE Definition (Page 5)
 
     > "ASE: Adult Sepsis Event
@@ -125,34 +133,60 @@ def _(mo):
 
 @app.cell
 def _(ase_results, mo):
-    total = len(ase_results)
-    presumed_inf = ase_results['presumed_infection'].sum()
-    sepsis = ase_results['sepsis'].sum()
+    # Multi-episode support: each row is an episode, not a hospitalization
+    total_episodes = len(ase_results)
+    total_hosp = ase_results['hospitalization_id'].nunique()
+
+    presumed_inf_episodes = ase_results['presumed_infection'].sum()
+    sepsis_episodes = ase_results['sepsis'].sum()
+
+    # Hospitalization-level counts (unique hospitalizations with at least one event)
+    hosp_with_presumed = ase_results[ase_results['presumed_infection'] == 1]['hospitalization_id'].nunique()
+    hosp_with_sepsis = ase_results[ase_results['sepsis'] == 1]['hospitalization_id'].nunique()
 
     # Handle type column which may have None values
-    type_counts = ase_results['type'].value_counts()
+    type_counts = ase_results[ase_results['sepsis'] == 1]['type'].value_counts()
     community = type_counts.get('community', 0)
     hospital = type_counts.get('hospital', 0)
 
-    # Calculate percentages safely
-    pi_pct = presumed_inf/total*100 if total > 0 else 0
-    sep_pct = sepsis/total*100 if total > 0 else 0
-    comm_pct = community/total*100 if total > 0 else 0
-    hosp_pct = hospital/total*100 if total > 0 else 0
+    # Calculate percentages safely (episode-level)
+    pi_pct = presumed_inf_episodes/total_episodes*100 if total_episodes > 0 else 0
+    sep_pct = sepsis_episodes/total_episodes*100 if total_episodes > 0 else 0
+
+    # Hospitalization-level percentages
+    hosp_pi_pct = hosp_with_presumed/total_hosp*100 if total_hosp > 0 else 0
+    hosp_sep_pct = hosp_with_sepsis/total_hosp*100 if total_hosp > 0 else 0
+
+    # Multi-episode stats
+    episodes_per_hosp = ase_results.groupby('hospitalization_id')['episode_id'].max()
+    hosp_with_multi = (episodes_per_hosp > 1).sum()
+    max_episodes = episodes_per_hosp.max() if len(episodes_per_hosp) > 0 else 0
 
     mo.md(f"""
     ## ASE Results Summary
 
-    | Metric | Count | Percentage |
-    |--------|-------|------------|
-    | Total Hospitalizations | {total:,} | 100% |
-    | Presumed Infection | {presumed_inf:,} | {pi_pct:.1f}% |
-    | **ASE Cases (Sepsis)** | **{sepsis:,}** | **{sep_pct:.1f}%** |
-    | Community-Onset | {community:,} | {comm_pct:.1f}% |
-    | Hospital-Onset | {hospital:,} | {hosp_pct:.1f}% |
+    ### Episode-Level Statistics (Multi-Episode Support)
+    | Metric | Count | % of Episodes |
+    |--------|-------|---------------|
+    | Total Episodes | {total_episodes:,} | 100% |
+    | Presumed Infection Episodes | {presumed_inf_episodes:,} | {pi_pct:.1f}% |
+    | **ASE Episodes (Sepsis)** | **{sepsis_episodes:,}** | **{sep_pct:.1f}%** |
+    | Community-Onset Episodes | {community:,} | - |
+    | Hospital-Onset Episodes | {hospital:,} | - |
+
+    ### Hospitalization-Level Statistics
+    | Metric | Count | % of Hospitalizations |
+    |--------|-------|-----------------------|
+    | Total Hospitalizations | {total_hosp:,} | 100% |
+    | Hospitalizations with Presumed Infection | {hosp_with_presumed:,} | {hosp_pi_pct:.1f}% |
+    | **Hospitalizations with ASE** | **{hosp_with_sepsis:,}** | **{hosp_sep_pct:.1f}%** |
+    | Hospitalizations with Multiple Episodes | {hosp_with_multi:,} | - |
+    | Max Episodes per Hospitalization | {max_episodes} | - |
 
     > **CDC Reference (Page 4):** "This definition was validated by Rhee, et al. and shown
     > to be present in 6% of hospital admissions in a study of nearly 400 hospitals."
+
+    > **CDC Reference (Page 6):** "Multiple window periods during a hospitalization are possible."
     """)
     return
 
@@ -369,15 +403,15 @@ def _(Path, ase_results):
 
 @app.cell
 def _(ase_results):
-    # Display sample of ASE positive cases
+    # Display sample of ASE positive episodes
     ase_positive = ase_results[ase_results['sepsis'] == 1].head(10)
     if len(ase_positive) > 0:
-        print("Sample ASE-positive cases:")
-        display_cols = ['hospitalization_id', 'presumed_infection', 'sepsis', 'type',
+        print("Sample ASE-positive episodes:")
+        display_cols = ['hospitalization_id', 'episode_id', 'presumed_infection', 'sepsis', 'type',
                        'ase_first_criteria_w_lactate']
         ase_positive[display_cols]
     else:
-        print("No ASE-positive cases found")
+        print("No ASE-positive episodes found")
         ase_positive = None
     return
 
@@ -390,10 +424,15 @@ def _(mo):
 
     **Summary:**
     - ASE calculation completed using CDC Adult Sepsis Event surveillance definition
-    - Results saved to `PHI_DATA/ase_results.parquet`
+    - **Multi-episode detection** enabled with 14-day Repeat Infection Timeframe (RIT)
+    - Results saved to `PHI_DATA/ase_results.parquet` (one row per episode)
     - Quality validation checks passed
 
-    **CDC Reference:** Hospital Toolkit for Adult Sepsis Surveillance (March 2018)
+    **CDC References:**
+    - Hospital Toolkit for Adult Sepsis Surveillance (March 2018)
+    - Page 6: "Multiple window periods during a hospitalization are possible."
+    - Page 9: "An RIT of 14 days is used [by NHSN]"
+
     https://www.cdc.gov/sepsis/pdfs/sepsis-surveillance-toolkit-mar-2018_508.pdf
     """
     )
